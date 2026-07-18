@@ -24,6 +24,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
+    Flowable,
     Image as PdfImage,
     KeepTogether,
     Paragraph,
@@ -325,6 +326,103 @@ def _pdf_photo(photo_bytes: bytes) -> PdfImage:
     return PdfImage(photo_buffer, width=pixel_width * scale, height=pixel_height * scale)
 
 
+class SectionIcon(Flowable):
+    """用矢量线条绘制章节图标，避免依赖可能缺字的图标字体。"""
+
+    def __init__(self, kind: str):
+        super().__init__()
+        self.kind = kind
+        self.width = 11 * mm
+        self.height = 11 * mm
+
+    def wrap(self, available_width: float, available_height: float):
+        return self.width, self.height
+
+    def draw(self) -> None:
+        canvas = self.canv
+        center = self.width / 2
+        radius = 4.6 * mm
+        canvas.saveState()
+        canvas.setFillColor(colors.HexColor("#E2F3EF"))
+        canvas.setStrokeColor(colors.HexColor("#5BAE9E"))
+        canvas.setLineWidth(0.7)
+        canvas.circle(center, self.height / 2, radius, fill=1, stroke=1)
+        canvas.setStrokeColor(colors.HexColor("#327C70"))
+        canvas.setFillColor(colors.HexColor("#327C70"))
+        canvas.setLineWidth(1.05)
+
+        if self.kind == "education":
+            canvas.line(center - 3.4 * mm, center + 0.8 * mm, center, center + 2.6 * mm)
+            canvas.line(center, center + 2.6 * mm, center + 3.4 * mm, center + 0.8 * mm)
+            canvas.line(center - 2.5 * mm, center + 0.1 * mm, center + 2.5 * mm, center + 0.1 * mm)
+            canvas.line(center - 2.1 * mm, center - 0.3 * mm, center - 2.1 * mm, center - 2.1 * mm)
+            canvas.line(center + 2.1 * mm, center - 0.3 * mm, center + 2.1 * mm, center - 2.1 * mm)
+        elif self.kind == "work":
+            canvas.roundRect(center - 3.1 * mm, center - 2.2 * mm, 6.2 * mm, 4.2 * mm, 0.7 * mm, fill=0, stroke=1)
+            canvas.arc(center - 1.6 * mm, center + 0.8 * mm, center + 1.6 * mm, center + 3.2 * mm, 0, 180)
+            canvas.line(center - 3.1 * mm, center - 0.2 * mm, center + 3.1 * mm, center - 0.2 * mm)
+            canvas.line(center, center + 0.4 * mm, center, center - 0.8 * mm)
+        elif self.kind == "project":
+            points = [
+                (center - 2.8 * mm, center + 2 * mm),
+                (center + 2.8 * mm, center + 1.1 * mm),
+                (center - 1.6 * mm, center - 2.2 * mm),
+            ]
+            canvas.line(*points[0], *points[1])
+            canvas.line(*points[1], *points[2])
+            canvas.line(*points[2], *points[0])
+            for x, y in points:
+                canvas.circle(x, y, 1.1 * mm, fill=1, stroke=0)
+        elif self.kind == "skills":
+            canvas.roundRect(center - 3.1 * mm, center - 3.1 * mm, 6.2 * mm, 6.2 * mm, 1 * mm, fill=0, stroke=1)
+            canvas.line(center - 2 * mm, center, center - 0.5 * mm, center - 1.6 * mm)
+            canvas.line(center - 0.5 * mm, center - 1.6 * mm, center + 2.3 * mm, center + 1.8 * mm)
+        else:
+            for offset in (1.7 * mm, 0, -1.7 * mm):
+                canvas.line(center - 2.5 * mm, center + offset, center + 2.5 * mm, center + offset)
+        canvas.restoreState()
+
+
+def _pdf_section_heading(title: str, kind: str, style, width: float) -> Table:
+    heading = Table(
+        [[SectionIcon(kind), Paragraph(html.escape(title), style)]],
+        colWidths=[12 * mm, width - 12 * mm],
+    )
+    heading.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F0F8F6")),
+        ("BOX", (0, 0), (-1, -1), 0.55, colors.HexColor("#CDE7E1")),
+        ("LEFTPADDING", (0, 0), (0, 0), 4),
+        ("RIGHTPADDING", (0, 0), (0, 0), 1),
+        ("LEFTPADDING", (1, 0), (1, 0), 2),
+        ("RIGHTPADDING", (1, 0), (1, 0), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    return heading
+
+
+def _draw_pdf_page(canvas, doc, pdf_font: str) -> None:
+    """绘制适合打印的浅色背景和页码。"""
+    canvas.saveState()
+    page_width, page_height = A4
+    canvas.setFillColor(colors.HexColor("#FAFCFB"))
+    canvas.rect(0, 0, page_width, page_height, fill=1, stroke=0)
+    canvas.setFillColor(colors.HexColor("#EAF6F2"))
+    canvas.rect(0, 0, 7 * mm, page_height, fill=1, stroke=0)
+    canvas.setFillColor(colors.HexColor("#EEF7FA"))
+    canvas.circle(page_width - 13 * mm, page_height - 15 * mm, 30 * mm, fill=1, stroke=0)
+    canvas.setFillColor(colors.HexColor("#F1F8F6"))
+    canvas.circle(-9 * mm, 18 * mm, 25 * mm, fill=1, stroke=0)
+    canvas.setStrokeColor(colors.HexColor("#D7ECE7"))
+    canvas.setLineWidth(0.7)
+    canvas.line(14 * mm, page_height - 8 * mm, page_width - 17 * mm, page_height - 8 * mm)
+    canvas.setFont(pdf_font, 8)
+    canvas.setFillColor(colors.HexColor("#6A8580"))
+    canvas.drawCentredString(page_width / 2, 8 * mm, f"第 {doc.page} 页")
+    canvas.restoreState()
+
+
 def create_resume_pdf(
     resume_data: dict,
     optimized_text: str | None = None,
@@ -355,10 +453,8 @@ def create_resume_pdf(
     )
     heading_style = ParagraphStyle(
         "ResumeHeading", parent=styles["Heading2"], fontName=pdf_font,
-        fontSize=12.5, leading=17, textColor=colors.HexColor("#1F4E79"),
-        spaceBefore=8, spaceAfter=4, backColor=colors.HexColor("#F4F7FB"),
-        borderColor=colors.HexColor("#1F4E79"), borderWidth=0.6,
-        borderPadding=(3, 5, 3, 5),
+        fontSize=12.5, leading=17, textColor=colors.HexColor("#276D63"),
+        spaceBefore=0, spaceAfter=0,
     )
     body_style = ParagraphStyle(
         "ResumeBody", parent=styles["BodyText"], fontName=pdf_font,
@@ -391,21 +487,32 @@ def create_resume_pdf(
     else:
         story.extend(header_items + [Spacer(1, 3 * mm)])
 
+    section_kinds = {
+        "个人简介": "summary",
+        "教育背景": "education",
+        "工作经历": "work",
+        "项目经历": "project",
+        "技能证书": "skills",
+    }
     for block_type, text in _content_blocks(resume_data, optimized_text):
         safe_text = html.escape(text)
         if block_type == "heading":
-            story.append(KeepTogether([Paragraph(safe_text, heading_style)]))
+            story.append(KeepTogether([
+                _pdf_section_heading(
+                    text,
+                    section_kinds.get(text, "summary"),
+                    heading_style,
+                    document.width,
+                )
+            ]))
         elif block_type == "bullet":
             story.append(Paragraph(html.escape(f"· {text}"), body_style))
         else:
             story.append(Paragraph(safe_text, body_style))
 
-    def add_page_number(canvas, doc) -> None:
-        canvas.saveState()
-        canvas.setFont(pdf_font, 8)
-        canvas.setFillColor(colors.HexColor("#64748B"))
-        canvas.drawCentredString(A4[0] / 2, 8 * mm, f"第 {doc.page} 页")
-        canvas.restoreState()
-
-    document.build(story, onFirstPage=add_page_number, onLaterPages=add_page_number)
+    document.build(
+        story,
+        onFirstPage=lambda canvas, doc: _draw_pdf_page(canvas, doc, pdf_font),
+        onLaterPages=lambda canvas, doc: _draw_pdf_page(canvas, doc, pdf_font),
+    )
     return output.getvalue()
