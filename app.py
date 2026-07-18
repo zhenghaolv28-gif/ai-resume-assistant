@@ -1,12 +1,14 @@
 """AI 简历助手的网页入口。"""
 
 from importlib.util import module_from_spec, spec_from_file_location
+import json
 import os
 from pathlib import Path
 
 import streamlit as st
 from dotenv import load_dotenv
 
+from resume_import import extract_resume_text, parse_resume_text
 from resume_template import clean_resume_text, create_resume_document, create_resume_pdf
 
 
@@ -25,6 +27,7 @@ _ai_service = _load_ai_service_from_file()
 DEFAULT_MODEL = _ai_service.DEFAULT_MODEL
 ResumeOptimizationError = _ai_service.ResumeOptimizationError
 analyze_job_match = _ai_service.analyze_job_match
+classify_imported_resume = _ai_service.classify_imported_resume
 optimize_resume_text = _ai_service.optimize_resume_text
 test_deepseek_connection = _ai_service.test_deepseek_connection
 
@@ -54,6 +57,27 @@ AI_RELEVANT_FIELDS = (
     "skills",
 )
 PHOTO_MAX_BYTES = 5 * 1024 * 1024
+RESUME_IMPORT_MAX_BYTES = 10 * 1024 * 1024
+IMPORT_FIELDS = (
+    "name",
+    "phone",
+    "email",
+    "city",
+    "target_role",
+    "summary",
+    "education",
+    "work_experience",
+    "project_experience",
+    "skills",
+)
+AI_IMPORT_FIELDS = (
+    "target_role",
+    "summary",
+    "education",
+    "work_experience",
+    "project_experience",
+    "skills",
+)
 
 
 def _initialize_form_state() -> None:
@@ -69,6 +93,59 @@ def _initialize_form_state() -> None:
 def _clear_job_match_result() -> None:
     """简历正文被手动修改后，清除已经过期的 JD 匹配结果。"""
     st.session_state.pop("job_match_result", None)
+
+
+def _load_resume_into_form(resume: dict) -> None:
+    """把确认后的主简历同步到下面的可编辑表单。"""
+    for field_name in FORM_FIELDS:
+        st.session_state[f"form_{field_name}"] = resume.get(field_name, "")
+
+
+def _master_resume_json(resume: dict) -> bytes:
+    """生成不含照片二进制数据的本地主简历备份。"""
+    backup = {
+        field_name: resume.get(field_name, "")
+        for field_name in FORM_FIELDS
+    }
+    return json.dumps(backup, ensure_ascii=False, indent=2).encode("utf-8")
+
+
+def _merge_ai_import_result(local_draft: dict, ai_result: dict) -> dict:
+    """保留本地识别的联系方式，用 AI 结果替换经历章节。"""
+    merged = local_draft.copy()
+    for field_name in AI_IMPORT_FIELDS:
+        ai_value = str(ai_result.get(field_name, "")).strip()
+        if ai_value:
+            merged[field_name] = ai_value
+    merged["unclassified_text"] = str(ai_result.get("unclassified", "")).strip()
+    merged["ai_assisted"] = True
+    return merged
+
+
+def _recognize_imported_file(
+    imported_file,
+    use_ai: bool,
+    api_key: str,
+) -> dict:
+    """读取上传文件；按用户选择执行本地或 AI 章节归类。"""
+    imported_text = extract_resume_text(
+        imported_file.getvalue(),
+        imported_file.name,
+    )
+    imported_draft = parse_resume_text(imported_text)
+    if not use_ai:
+        return imported_draft
+
+    sensitive_values = [
+        imported_draft.get(field_name, "")
+        for field_name in ("name", "phone", "email", "city")
+    ]
+    ai_result = classify_imported_resume(
+        imported_draft.get("raw_text", imported_text),
+        api_key,
+        sensitive_values=sensitive_values,
+    )
+    return _merge_ai_import_result(imported_draft, ai_result)
 
 
 @st.dialog("根据 AI 建议优化", width="large")
@@ -127,18 +204,182 @@ def _show_suggestion_optimizer(
 
 
 st.set_page_config(page_title="AI 简历助手", page_icon="📄", layout="centered")
+st.session_state.setdefault("deepseek_api_key", os.getenv("DEEPSEEK_API_KEY", ""))
 _initialize_form_state()
 
 st.title("📄 AI 简历助手")
 st.write("填写真实经历，后续让 AI 帮你整理成更清晰的简历。")
-st.info("🔒 当前内容只保存在这个浏览器会话中，不会写入硬盘。")
+st.info("🔒 本地识别不会发送资料；AI 精准识别只有在你勾选同意后才会发送脱敏文本。")
+
+import_notice = st.session_state.pop("resume_import_notice", None)
+if import_notice:
+    st.success(import_notice)
+
+with st.expander("📥 导入已有 PDF / Word 简历", expanded=False):
+    st.write("先读取文字并分段，再由你逐项确认；确认前不会覆盖下面已经填写的内容。")
+    imported_file = st.file_uploader(
+        "选择已有简历",
+        type=("pdf", "docx"),
+        key="resume_import_file",
+        help="支持文字版 PDF 和 Word（.docx），最大 10MB。扫描图片版 PDF 暂时无法直接识别。",
+    )
+    st.caption("本地识别适合先快速查看；如果板块错位，请使用 AI 精准识别。")
+    ai_import_consent = st.checkbox(
+        "我同意将隐藏联系方式后的简历经历发送给 DeepSeek 做章节归类",
+        key="resume_import_ai_consent",
+        help="姓名、手机、邮箱、城市会先在本地替换为隐藏标记；经历、教育、项目和技能文字会发送给 DeepSeek。",
+    )
+    local_column, ai_column = st.columns(2)
+    with local_column:
+        start_local_import = st.button("🔍 本地快速识别", use_container_width=True)
+    with ai_column:
+        start_ai_import = st.button(
+            "🤖 AI 精准识别",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if start_local_import or start_ai_import:
+        if imported_file is None:
+            st.warning("请先选择一个 PDF 或 Word 文件。")
+        elif imported_file.size > RESUME_IMPORT_MAX_BYTES:
+            st.error("文件超过 10MB，请压缩后重新上传。")
+        elif start_ai_import and not ai_import_consent:
+            st.warning("请先勾选同意，AI 才能帮助归类简历章节。")
+        else:
+            current_api_key = st.session_state.get("deepseek_api_key", "")
+            if start_ai_import and not current_api_key.strip():
+                st.warning("请先在左侧填写 DeepSeek API Key。")
+            else:
+                try:
+                    spinner_text = (
+                        "正在本地读取并使用 AI 归类章节……"
+                        if start_ai_import
+                        else "正在本地读取和整理简历……"
+                    )
+                    with st.spinner(spinner_text):
+                        imported_draft = _recognize_imported_file(
+                            imported_file,
+                            use_ai=start_ai_import,
+                            api_key=current_api_key,
+                        )
+                    for field_name in IMPORT_FIELDS:
+                        st.session_state.pop(f"import_{field_name}", None)
+                    st.session_state["resume_import_draft"] = imported_draft
+                    st.session_state["resume_import_filename"] = imported_file.name
+                    st.session_state["resume_import_method"] = (
+                        "AI 精准识别" if start_ai_import else "本地快速识别"
+                    )
+                except ValueError as error:
+                    st.error(str(error))
+                except ResumeOptimizationError as error:
+                    st.error(str(error))
+
+imported_draft = st.session_state.get("resume_import_draft")
+if imported_draft:
+    for field_name in IMPORT_FIELDS:
+        st.session_state.setdefault(
+            f"import_{field_name}",
+            imported_draft.get(field_name, ""),
+        )
+
+    recognized_count = sum(
+        bool(str(imported_draft.get(field_name, "")).strip())
+        for field_name in IMPORT_FIELDS
+    )
+    st.info(
+        f"已从“{st.session_state.get('resume_import_filename', '上传文件')}”"
+        f"使用{st.session_state.get('resume_import_method', '本地快速识别')}识别出 {recognized_count} 项。"
+        "请检查并修改，确认后才会保存为主简历。"
+    )
+
+    with st.form("resume_import_confirmation"):
+        st.subheader("确认识别内容")
+        basic_left, basic_right = st.columns(2)
+        with basic_left:
+            st.text_input("姓名 *", key="import_name")
+            st.text_input("手机号码", key="import_phone")
+        with basic_right:
+            st.text_input("电子邮箱", key="import_email")
+            st.text_input("所在城市", key="import_city")
+
+        st.text_input("目标岗位 *", key="import_target_role")
+        st.text_area("自我介绍", height=120, key="import_summary")
+        st.text_area("教育经历", height=140, key="import_education")
+        st.text_area("工作或实习经历", height=220, key="import_work_experience")
+        st.text_area("项目经历", height=180, key="import_project_experience")
+        st.text_area("技能与证书", height=140, key="import_skills")
+
+        confirm_import = st.form_submit_button(
+            "✅ 确认并保存为主简历",
+            type="primary",
+            use_container_width=True,
+        )
+
+    with st.expander("查看读取到的完整原文（用于核对漏识别内容）"):
+        st.text_area(
+            "完整原文",
+            value=imported_draft.get("raw_text", ""),
+            height=240,
+            disabled=True,
+        )
+        if imported_draft.get("unclassified_text"):
+            st.caption("下面内容没有自动归入章节，请按需要复制到上面的对应输入框。")
+            st.text_area(
+                "未分类内容",
+                value=imported_draft["unclassified_text"],
+                height=140,
+                disabled=True,
+            )
+
+    if confirm_import:
+        confirmed_resume = {
+            field_name: st.session_state.get(f"import_{field_name}", "").strip()
+            for field_name in IMPORT_FIELDS
+        }
+        if not confirmed_resume["name"] or not confirmed_resume["target_role"]:
+            st.warning("请补充姓名和目标岗位后再保存。")
+        else:
+            previous_resume = st.session_state.get("resume_data", {})
+            confirmed_resume["job_description"] = ""
+            confirmed_resume["photo_bytes"] = previous_resume.get("photo_bytes")
+            st.session_state["resume_data"] = confirmed_resume
+            st.session_state["master_resume_data"] = confirmed_resume.copy()
+            _load_resume_into_form(confirmed_resume)
+            st.session_state.pop("optimized_resume", None)
+            st.session_state.pop("optimized_resume_editor", None)
+            st.session_state.pop("job_match_result", None)
+            st.session_state.pop("resume_import_draft", None)
+            st.session_state["resume_import_notice"] = (
+                "导入内容已经保存为主简历，并已填入下方表单。"
+            )
+            st.rerun()
+
+master_resume = st.session_state.get("master_resume_data")
+if master_resume:
+    backup_name = "".join(
+        character
+        for character in f"{master_resume.get('name', '我的')}-主简历备份"
+        if character not in '\\/:*?\"<>|'
+    ) or "我的主简历备份"
+    backup_column, status_column = st.columns([2, 3])
+    with backup_column:
+        st.download_button(
+            "⬇️ 下载主简历备份",
+            data=_master_resume_json(master_resume),
+            file_name=f"{backup_name}.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+    with status_column:
+        st.caption("主简历已保存在当前浏览器会话；下载 JSON 备份可长期保留。")
 
 with st.sidebar:
     st.header("AI 设置")
     api_key = st.text_input(
         "DeepSeek API Key",
         type="password",
-        value=os.getenv("DEEPSEEK_API_KEY", ""),
+        key="deepseek_api_key",
         placeholder="sk-...",
         help="直接填写时只保存在当前浏览器会话中；也可使用本地 .env 文件。",
     )
@@ -276,6 +517,7 @@ if submitted:
         had_optimized_resume = bool(st.session_state.get("optimized_resume"))
 
         st.session_state["resume_data"] = updated_resume_data
+        st.session_state["master_resume_data"] = updated_resume_data.copy()
 
         if ai_content_changed:
             st.session_state.pop("optimized_resume", None)
@@ -285,9 +527,9 @@ if submitted:
         if ai_content_changed and had_optimized_resume:
             st.success("信息已更新。岗位或经历发生变化，请重新进行 AI 优化。")
         elif previous_resume_data is not None:
-            st.success("信息已更新；只修改联系方式时，AI 优化结果会保留。")
+            st.success("主简历已更新；只修改联系方式时，AI 优化结果会保留。")
         else:
-            st.success("信息已暂存在当前浏览器会话中。")
+            st.success("已经保存为主简历；建议同时下载上方的 JSON 备份长期保留。")
 
 resume_data = st.session_state.get("resume_data")
 if resume_data:
