@@ -24,6 +24,7 @@ def _load_ai_service_from_file():
 _ai_service = _load_ai_service_from_file()
 DEFAULT_MODEL = _ai_service.DEFAULT_MODEL
 ResumeOptimizationError = _ai_service.ResumeOptimizationError
+analyze_job_match = _ai_service.analyze_job_match
 optimize_resume_text = _ai_service.optimize_resume_text
 test_deepseek_connection = _ai_service.test_deepseek_connection
 
@@ -63,6 +64,67 @@ def _initialize_form_state() -> None:
             f"form_{field_name}",
             saved_resume.get(field_name, ""),
         )
+
+
+def _clear_job_match_result() -> None:
+    """简历正文被手动修改后，清除已经过期的 JD 匹配结果。"""
+    st.session_state.pop("job_match_result", None)
+
+
+@st.dialog("根据 AI 建议优化", width="large")
+def _show_suggestion_optimizer(
+    resume_data: dict,
+    api_key: str,
+    suggestions: list[str],
+) -> None:
+    """让用户确认匹配建议，并把建议发送给 AI 重新优化简历。"""
+    st.write("下面的岗位匹配建议将与简历内容一起发送给 DeepSeek。")
+    suggestion_text = "\n".join(
+        f"{index}. {suggestion}"
+        for index, suggestion in enumerate(suggestions, start=1)
+    )
+    st.text_area(
+        "AI 匹配建议",
+        value=suggestion_text,
+        height=180,
+        disabled=True,
+    )
+    extra_instruction = st.text_area(
+        "补充要求（可选）",
+        placeholder="例如：重点突出项目经验，语言更简洁。",
+        height=100,
+        key="suggestion_optimizer_extra_instruction",
+    )
+    st.caption("AI 只会改写已有真实内容，不会自动补造经历、技能或数据。")
+
+    if st.button("确认并开始优化", type="primary", use_container_width=True):
+        if not api_key.strip():
+            st.warning("请先在左侧填写 DeepSeek API Key。")
+            return
+
+        guidance_parts = ["岗位匹配建议：", suggestion_text]
+        if extra_instruction.strip():
+            guidance_parts.extend(["", "用户补充要求：", extra_instruction.strip()])
+
+        try:
+            with st.spinner("AI 正在根据建议优化简历，请稍候……"):
+                optimized_resume = clean_resume_text(
+                    optimize_resume_text(
+                        resume_data,
+                        api_key,
+                        optimization_guidance="\n".join(guidance_parts),
+                    )
+                )
+            st.session_state["optimized_resume"] = optimized_resume
+            st.session_state["optimized_resume_editor"] = optimized_resume
+            st.session_state.pop("job_match_result", None)
+            st.session_state["suggestion_optimization_notice"] = (
+                "已根据 JD 匹配建议完成优化，请检查下面的 AI 优化结果。"
+            )
+            st.rerun()
+        except ResumeOptimizationError as error:
+            st.error(str(error))
+
 
 st.set_page_config(page_title="AI 简历助手", page_icon="📄", layout="centered")
 _initialize_form_state()
@@ -218,6 +280,7 @@ if submitted:
         if ai_content_changed:
             st.session_state.pop("optimized_resume", None)
             st.session_state.pop("optimized_resume_editor", None)
+            st.session_state.pop("job_match_result", None)
 
         if ai_content_changed and had_optimized_resume:
             st.success("信息已更新。岗位或经历发生变化，请重新进行 AI 优化。")
@@ -260,10 +323,116 @@ if resume_data:
             st.write(resume_data[key])
 
     st.divider()
+    st.subheader("JD 岗位匹配")
+    st.caption(
+        "AI 会比较岗位 JD 与当前简历内容。80–100 为适配，60–79 为一般适配，0–59 为不适配。"
+    )
+
+    if st.button("🎯 分析 JD 匹配度", use_container_width=True):
+        if not resume_data.get("job_description", "").strip():
+            st.warning("请先在上方填写或粘贴完整的岗位要求。")
+        elif not api_key.strip():
+            st.warning("请先在左侧填写 DeepSeek API Key。")
+        else:
+            try:
+                with st.spinner("AI 正在分析岗位匹配度，请稍候……"):
+                    job_match_result = analyze_job_match(
+                        resume_data,
+                        api_key,
+                        current_resume_text=st.session_state.get(
+                            "optimized_resume_editor",
+                            "",
+                        ),
+                    )
+                st.session_state["job_match_result"] = job_match_result
+            except ResumeOptimizationError as error:
+                st.error(str(error))
+
+    job_match_result = st.session_state.get("job_match_result")
+    if job_match_result:
+        match_score = int(job_match_result["score"])
+        match_level = job_match_result["level"]
+
+        st.metric("简历与岗位匹配度", f"{match_score}%")
+        st.progress(match_score)
+
+        if match_level == "适配":
+            st.success("适配：当前简历与岗位要求的主要内容较为匹配。")
+        elif match_level == "一般适配":
+            st.warning("一般适配：具备部分相关条件，但简历仍有明显补强空间。")
+        else:
+            st.error("不适配：当前简历与岗位要求存在较大差距。")
+
+        matched_column, missing_column = st.columns(2)
+        with matched_column:
+            st.markdown("#### 已匹配内容")
+            matched_points = job_match_result.get("matched_points", [])
+            if matched_points:
+                for point in matched_points:
+                    st.markdown(f"- {point}")
+            else:
+                st.caption("暂未识别到明确匹配内容。")
+
+        with missing_column:
+            st.markdown("#### 缺失或证据不足")
+            missing_points = job_match_result.get("missing_points", [])
+            if missing_points:
+                for point in missing_points:
+                    st.markdown(f"- {point}")
+            else:
+                st.caption("暂未发现明显缺失项。")
+
+        if match_level in ("一般适配", "不适配"):
+            st.markdown("#### AI 修改建议")
+            st.caption("只补充真实经历；如果没有相关经验，不要为了提高分数而编造。")
+            for index, suggestion in enumerate(
+                job_match_result.get("suggestions", []),
+                start=1,
+            ):
+                st.markdown(f"{index}. {suggestion}")
+
+    st.divider()
     st.subheader("AI 优化")
     st.caption("只发送目标岗位和经历文本；姓名、手机、邮箱、城市不会发送给 AI。")
 
-    if st.button("✨ 使用 AI 优化简历", type="primary", use_container_width=True):
+    optimization_notice = st.session_state.pop("suggestion_optimization_notice", None)
+    if optimization_notice:
+        st.success(optimization_notice)
+
+    suggestion_optimization_available = bool(
+        job_match_result
+        and job_match_result.get("level") in ("一般适配", "不适配")
+        and job_match_result.get("suggestions")
+    )
+    if suggestion_optimization_available:
+        standard_column, suggestion_column = st.columns(2)
+        with standard_column:
+            run_standard_optimization = st.button(
+                "✨ 常规 AI 优化",
+                use_container_width=True,
+            )
+        with suggestion_column:
+            open_suggestion_optimizer = st.button(
+                "💡 根据 AI 建议优化",
+                type="primary",
+                use_container_width=True,
+            )
+    else:
+        run_standard_optimization = st.button(
+            "✨ 使用 AI 优化简历",
+            type="primary",
+            use_container_width=True,
+        )
+        open_suggestion_optimizer = False
+
+    if open_suggestion_optimizer:
+        _show_suggestion_optimizer(
+            resume_data,
+            api_key,
+            job_match_result.get("suggestions", []),
+        )
+
+    if run_standard_optimization:
         if not api_key.strip():
             st.warning("请先在左侧填写 DeepSeek API Key。")
         else:
@@ -274,6 +443,7 @@ if resume_data:
                     )
                 st.session_state["optimized_resume"] = optimized_resume
                 st.session_state["optimized_resume_editor"] = optimized_resume
+                st.session_state.pop("job_match_result", None)
                 st.success("AI 优化完成，你可以继续修改结果。")
             except ResumeOptimizationError as error:
                 st.error(str(error))
@@ -286,6 +456,7 @@ if optimized_resume:
         "可以在这里继续修改",
         height=500,
         key="optimized_resume_editor",
+        on_change=_clear_job_match_result,
     )
     st.caption("导出时会使用这里的最终内容。")
 

@@ -307,11 +307,20 @@ def optimize_resume_text(
     resume_data: dict,
     api_key: str,
     model: str = DEFAULT_MODEL,
+    optimization_guidance: str = "",
 ) -> str:
     """通过 DeepSeek Chat Completions API 返回优化后的简历正文。"""
     cleaned_key = api_key.strip()
     if not cleaned_key:
         raise ResumeOptimizationError("请先在左侧填写 DeepSeek API Key。")
+
+    user_content = _build_private_resume_input(resume_data)
+    if optimization_guidance.strip():
+        user_content += (
+            "\n\n请根据以下岗位匹配建议优化简历。只改写用户已经提供的真实内容，"
+            "不要编造新的经历、技能、数字或证书：\n"
+            f"{optimization_guidance.strip()}"
+        )
 
     try:
         response = _request_deepseek(
@@ -322,7 +331,7 @@ def optimize_resume_text(
                 "model": model,
                 "messages": [
                     {"role": "system", "content": SYSTEM_INSTRUCTIONS},
-                    {"role": "user", "content": _build_private_resume_input(resume_data)},
+                    {"role": "user", "content": user_content},
                 ],
                 "max_tokens": 1600,
                 "stream": False,
@@ -337,3 +346,140 @@ def optimize_resume_text(
         return optimized_text
     except (ValueError, KeyError, TypeError, IndexError) as exc:
         raise ResumeOptimizationError("DeepSeek 返回了无法识别的简历结果。") from exc
+
+
+MATCH_SYSTEM_INSTRUCTIONS = """
+你是一名严谨的招聘岗位匹配分析助手。请比较岗位 JD 与候选人的简历内容，并只依据用户明确提供的信息评分，不能推测或编造经历。
+
+评分总分为 100 分：
+1. 核心技能和工具匹配度：40 分。
+2. 工作职责、项目经验和行业经验匹配度：35 分。
+3. 教育背景、证书和年限要求匹配度：15 分。
+4. 业绩证据、岗位关键词和表达完整度：10 分。
+
+必须只返回一个 JSON 对象，不要使用 Markdown，不要输出解释文字。JSON 格式：
+{
+  "score": 0到100之间的整数,
+  "matched_points": ["已经匹配的具体要求"],
+  "missing_points": ["简历中没有体现或证据不足的要求"],
+  "suggestions": ["在不编造事实的前提下可以怎样修改简历"]
+}
+
+当分数低于 80 分时，给出 3 到 6 条具体建议。建议只能帮助用户重写、补充真实信息或调整顺序，不能要求用户编造经历、技能、数字或证书。分数达到 80 分时，suggestions 返回空数组。
+""".strip()
+
+
+def _build_job_match_input(
+    resume_data: dict,
+    current_resume_text: str = "",
+) -> str:
+    """构造不含姓名和联系方式的 JD 匹配输入。"""
+    original_sections = {
+        "自我介绍": resume_data.get("summary", ""),
+        "教育经历": resume_data.get("education", ""),
+        "工作或实习经历": resume_data.get("work_experience", ""),
+        "项目经历": resume_data.get("project_experience", ""),
+        "技能与证书": resume_data.get("skills", ""),
+    }
+    safe_input = {
+        "目标岗位": resume_data.get("target_role", ""),
+        "岗位JD": resume_data.get("job_description", ""),
+        "当前简历内容": current_resume_text.strip() or original_sections,
+    }
+    return json.dumps(safe_input, ensure_ascii=False, indent=2)
+
+
+def _parse_job_match_result(content: str) -> dict:
+    """解析并规范化模型返回的 JD 匹配 JSON。"""
+    start = content.find("{")
+    end = content.rfind("}")
+    if start < 0 or end <= start:
+        raise ResumeOptimizationError("AI 没有返回有效的 JD 匹配结果，请重试。")
+
+    try:
+        raw_result = json.loads(content[start : end + 1])
+        if not isinstance(raw_result, dict):
+            raise ValueError("JD 匹配结果不是 JSON 对象")
+        score = int(round(float(raw_result.get("score", 0))))
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise ResumeOptimizationError("AI 返回的 JD 匹配结果格式不正确，请重试。") from exc
+
+    score = max(0, min(100, score))
+
+    def clean_list(name: str, limit: int = 6) -> list[str]:
+        value = raw_result.get(name, [])
+        if not isinstance(value, list):
+            return []
+        return [
+            str(item).strip()
+            for item in value
+            if str(item).strip()
+        ][:limit]
+
+    if score >= 80:
+        level = "适配"
+    elif score >= 60:
+        level = "一般适配"
+    else:
+        level = "不适配"
+
+    suggestions = clean_list("suggestions") if score < 80 else []
+    if score < 80 and not suggestions:
+        suggestions = [
+            "根据缺失项补充真实经历或技能证据；如果没有相关经历，请不要编造。",
+            "把与目标岗位最相关的工作和项目经历放到更靠前的位置。",
+            "使用岗位 JD 中与你真实经历一致的关键词重新描述相关内容。",
+        ]
+
+    return {
+        "score": score,
+        "level": level,
+        "matched_points": clean_list("matched_points"),
+        "missing_points": clean_list("missing_points"),
+        "suggestions": suggestions,
+    }
+
+
+def analyze_job_match(
+    resume_data: dict,
+    api_key: str,
+    current_resume_text: str = "",
+    model: str = DEFAULT_MODEL,
+) -> dict:
+    """使用 DeepSeek 分析简历与岗位 JD 的匹配度。"""
+    cleaned_key = api_key.strip()
+    if not cleaned_key:
+        raise ResumeOptimizationError("请先在左侧填写 DeepSeek API Key。")
+    if not resume_data.get("job_description", "").strip():
+        raise ResumeOptimizationError("请先填写岗位要求或粘贴完整的岗位 JD。")
+
+    try:
+        response = _request_deepseek(
+            "POST",
+            "/chat/completions",
+            cleaned_key,
+            json_body={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": MATCH_SYSTEM_INSTRUCTIONS},
+                    {
+                        "role": "user",
+                        "content": _build_job_match_input(
+                            resume_data,
+                            current_resume_text=current_resume_text,
+                        ),
+                    },
+                ],
+                "max_tokens": 1200,
+                "stream": False,
+                "thinking": {"type": "disabled"},
+            },
+        )
+        content = (
+            response.json()["choices"][0]["message"].get("content") or ""
+        ).strip()
+        return _parse_job_match_result(content)
+    except ResumeOptimizationError:
+        raise
+    except (ValueError, KeyError, TypeError, IndexError) as exc:
+        raise ResumeOptimizationError("DeepSeek 返回了无法识别的 JD 匹配结果。") from exc
