@@ -8,6 +8,8 @@
 2. 使用 DeepSeek 优化中文简历描述，不编造用户未提供的经历。
 3. 只把岗位和经历文字发送给 AI，姓名、手机、邮箱和城市不会发送。
 4. 每位使用者填写自己的 DeepSeek API Key，Key 不写入项目文件。
+5. 上传 JPG/PNG 证件照并在简历预览中查看。
+6. 一键导出带证件照的 Word 和 PDF 简历。
 
 ## 本地运行
 
@@ -35,8 +37,8 @@ Windows 用户可以双击 `启动简历助手.bat`。
 - 不要把真实 API Key 写进代码、`.env.example` 或 GitHub。
 - 本地 `.env`、虚拟环境和 Streamlit Secrets 已通过 `.gitignore` 排除。
 - 简历内容目前只保存在当前 Streamlit 会话中，不写入项目文件。
+- 证件照只保存在当前 Streamlit 会话，不会发送给 DeepSeek。
 
 ## 后续功能
 
 - 生成不同岗位版本。
-- 导出 Word 简历文件。
