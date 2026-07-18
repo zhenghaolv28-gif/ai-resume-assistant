@@ -7,7 +7,7 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 
-from resume_export import create_resume_document, create_resume_pdf
+from resume_template import clean_resume_text, create_resume_document, create_resume_pdf
 
 
 def _load_ai_service_from_file():
@@ -269,7 +269,9 @@ if resume_data:
         else:
             try:
                 with st.spinner("AI 正在优化，请稍候……"):
-                    optimized_resume = optimize_resume_text(resume_data, api_key)
+                    optimized_resume = clean_resume_text(
+                        optimize_resume_text(resume_data, api_key)
+                    )
                 st.session_state["optimized_resume"] = optimized_resume
                 st.session_state["optimized_resume_editor"] = optimized_resume
                 st.success("AI 优化完成，你可以继续修改结果。")
