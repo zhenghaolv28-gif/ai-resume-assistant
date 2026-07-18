@@ -7,6 +7,8 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 
+from resume_export import create_resume_document, create_resume_pdf
+
 
 def _load_ai_service_from_file():
     """从确切文件路径加载模块，避免 Streamlit 使用旧模块缓存。"""
@@ -50,6 +52,7 @@ AI_RELEVANT_FIELDS = (
     "project_experience",
     "skills",
 )
+PHOTO_MAX_BYTES = 5 * 1024 * 1024
 
 
 def _initialize_form_state() -> None:
@@ -117,6 +120,18 @@ with st.form("resume_form"):
             key="form_city",
         )
 
+    uploaded_photo = st.file_uploader(
+        "证件照（可选）",
+        type=("jpg", "jpeg", "png"),
+        key="form_photo",
+        help="建议使用竖版 3:4 证件照，支持 JPG、PNG，最大 5MB。照片不会发送给 AI。",
+    )
+    saved_photo = st.session_state.get("resume_data", {}).get("photo_bytes")
+    if uploaded_photo is not None:
+        st.image(uploaded_photo, width=120, caption="新上传的证件照")
+    elif saved_photo:
+        st.image(saved_photo, width=120, caption="已保存的证件照")
+
     st.subheader("2. 求职目标")
     target_role = st.text_input(
         "目标岗位 *",
@@ -169,6 +184,14 @@ if submitted:
         st.warning("请先填写带 * 的姓名和目标岗位。")
     else:
         previous_resume_data = st.session_state.get("resume_data")
+        photo_bytes = (
+            uploaded_photo.getvalue()
+            if uploaded_photo is not None
+            else (previous_resume_data or {}).get("photo_bytes")
+        )
+        if photo_bytes and len(photo_bytes) > PHOTO_MAX_BYTES:
+            st.error("证件照超过 5MB，请压缩后重新上传。")
+            st.stop()
         updated_resume_data = {
             "name": name.strip(),
             "phone": phone.strip(),
@@ -181,6 +204,7 @@ if submitted:
             "work_experience": work_experience.strip(),
             "project_experience": project_experience.strip(),
             "skills": skills.strip(),
+            "photo_bytes": photo_bytes,
         }
         ai_content_changed = previous_resume_data is not None and any(
             previous_resume_data.get(field_name, "")
@@ -206,17 +230,22 @@ resume_data = st.session_state.get("resume_data")
 if resume_data:
     st.divider()
     st.subheader("简历内容预览")
-    st.header(resume_data["name"])
+    preview_main, preview_photo = st.columns([4, 1])
+    with preview_main:
+        st.header(resume_data["name"])
 
-    contact_items = [
-        item
-        for item in (resume_data["phone"], resume_data["email"], resume_data["city"])
-        if item
-    ]
-    if contact_items:
-        st.caption(" ｜ ".join(contact_items))
+        contact_items = [
+            item
+            for item in (resume_data["phone"], resume_data["email"], resume_data["city"])
+            if item
+        ]
+        if contact_items:
+            st.caption(" ｜ ".join(contact_items))
 
-    st.markdown(f"**目标岗位：** {resume_data['target_role']}")
+        st.markdown(f"**目标岗位：** {resume_data['target_role']}")
+    with preview_photo:
+        if resume_data.get("photo_bytes"):
+            st.image(resume_data["photo_bytes"], use_container_width=True)
 
     preview_sections = (
         ("自我介绍", "summary"),
@@ -256,4 +285,51 @@ if optimized_resume:
         height=500,
         key="optimized_resume_editor",
     )
-    st.caption("下一步将使用这里的最终内容生成不同岗位版本和 Word 文件。")
+    st.caption("导出时会使用这里的最终内容。")
+
+if resume_data:
+    st.divider()
+    st.subheader("导出简历")
+    final_resume_text = st.session_state.get("optimized_resume_editor", "").strip()
+    if final_resume_text:
+        st.success("将导出 AI 优化后的最终内容。")
+    else:
+        st.info("还没有 AI 优化结果，将导出你填写的原始内容。")
+
+    try:
+        word_bytes = create_resume_document(
+            resume_data,
+            optimized_text=final_resume_text or None,
+            photo_bytes=resume_data.get("photo_bytes"),
+        )
+        pdf_bytes = create_resume_pdf(
+            resume_data,
+            optimized_text=final_resume_text or None,
+            photo_bytes=resume_data.get("photo_bytes"),
+        )
+        safe_name = "".join(
+            character
+            for character in f"{resume_data['name']}-{resume_data['target_role']}"
+            if character not in '\\/:*?\"<>|'
+        ) or "我的简历"
+        word_column, pdf_column = st.columns(2)
+        with word_column:
+            st.download_button(
+                "⬇️ 导出 Word",
+                data=word_bytes,
+                file_name=f"{safe_name}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+            )
+        with pdf_column:
+            st.download_button(
+                "⬇️ 一键导出 PDF",
+                data=pdf_bytes,
+                file_name=f"{safe_name}.pdf",
+                mime="application/pdf",
+                type="primary",
+                use_container_width=True,
+            )
+    except Exception as error:
+        st.error(f"生成简历失败：{error}")
+        st.caption("如果刚上传照片，请换一张 JPG 或 PNG 后重试。")

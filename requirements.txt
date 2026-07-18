@@ -2,3 +2,4 @@ streamlit
 httpx
 python-dotenv
 python-docx
+reportlab
