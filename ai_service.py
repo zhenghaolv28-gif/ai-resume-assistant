@@ -10,6 +10,8 @@ import time
 
 import httpx
 
+from resume_review import normalize_review_changes
+
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
@@ -347,6 +349,96 @@ def optimize_resume_text(
         return optimized_text
     except (ValueError, KeyError, TypeError, IndexError) as exc:
         raise ResumeOptimizationError("DeepSeek 返回了无法识别的简历结果。") from exc
+
+
+REVIEW_SYSTEM_INSTRUCTIONS = """
+你是一名专业、谨慎的中文简历修改顾问。你的任务不是输出一份全新的简历，而是返回可以逐条审阅的修改建议。
+
+必须遵守以下规则：
+1. AI 不得编造公司、项目、技能、证书和业绩数字。
+2. 只能改写用户已经提供的真实内容。不得新增原文没有的公司、学校、岗位、项目、工具、技能、证书、职责、成果、日期、金额、比例或数量。
+3. original_text 必须从对应章节的原文中逐字复制一段连续且完整的句子、段落或项目行，不能概括，不能改字。
+4. revised_text 只能改善 original_text 的清晰度、顺序、专业程度和与目标岗位相关的表达，不能改变事实含义。
+5. 每条建议只修改一个原文片段。不同建议不得使用相同 original_text，也不要让修改片段互相重叠。
+6. 如果没有安全且有价值的修改，可以返回空 changes，不要为了凑数量而修改。
+7. 不得输出姓名、手机、邮箱和城市。
+8. 只返回一个 JSON 对象，不使用 Markdown，不输出 JSON 之外的解释。
+
+JSON 格式：
+{
+  "changes": [
+    {
+      "section": "summary、education、work_experience、project_experience 或 skills",
+      "original_text": "从对应原文逐字复制的完整片段",
+      "revised_text": "不改变事实的修改后片段",
+      "reason": "说明为什么这样修改，不得声称添加了原文不存在的事实"
+    }
+  ]
+}
+""".strip()
+
+
+def _parse_resume_review_result(content: str, resume_data: dict) -> list[dict]:
+    """解析结构化修改建议，并执行原文锚定和数字防编造校验。"""
+    start = content.find("{")
+    end = content.rfind("}")
+    if start < 0 or end <= start:
+        raise ResumeOptimizationError("AI 没有返回有效的逐条修改建议，请重试。")
+    try:
+        raw_result = json.loads(content[start : end + 1])
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ResumeOptimizationError("AI 返回的逐条修改格式不正确，请重试。") from exc
+
+    changes = normalize_review_changes(raw_result, resume_data)
+    if not changes:
+        raise ResumeOptimizationError(
+            "AI 没有给出可安全应用的修改。可能是建议没有对应原文，或包含了原文没有的数字。"
+        )
+    return changes
+
+
+def optimize_resume_changes(
+    resume_data: dict,
+    api_key: str,
+    model: str = DEFAULT_MODEL,
+    optimization_guidance: str = "",
+) -> list[dict]:
+    """通过 DeepSeek 返回可逐条接受或拒绝的简历修改建议。"""
+    cleaned_key = api_key.strip()
+    if not cleaned_key:
+        raise ResumeOptimizationError("请先在左侧填写 DeepSeek API Key。")
+
+    user_content = _build_private_resume_input(resume_data)
+    if optimization_guidance.strip():
+        user_content += (
+            "\n\n可以参考以下岗位匹配建议，但仍须遵守不得编造事实的规则：\n"
+            f"{optimization_guidance.strip()}"
+        )
+
+    try:
+        response = _request_deepseek(
+            "POST",
+            "/chat/completions",
+            cleaned_key,
+            json_body={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": REVIEW_SYSTEM_INSTRUCTIONS},
+                    {"role": "user", "content": user_content},
+                ],
+                "max_tokens": 3600,
+                "stream": False,
+                "thinking": {"type": "disabled"},
+            },
+        )
+        content = (
+            response.json()["choices"][0]["message"].get("content") or ""
+        ).strip()
+        return _parse_resume_review_result(content, resume_data)
+    except ResumeOptimizationError:
+        raise
+    except (ValueError, KeyError, TypeError, IndexError) as exc:
+        raise ResumeOptimizationError("DeepSeek 返回了无法识别的逐条修改结果。") from exc
 
 
 MATCH_SYSTEM_INSTRUCTIONS = """

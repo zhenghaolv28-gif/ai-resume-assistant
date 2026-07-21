@@ -1,6 +1,7 @@
 """AI 简历助手的网页入口。"""
 
 from base64 import b64encode
+from copy import deepcopy
 from importlib.util import module_from_spec, spec_from_file_location
 import json
 import os
@@ -11,6 +12,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from resume_import import extract_resume_text, parse_resume_text
+from resume_review import build_reviewed_resume_text, text_diff_fragments
 from resume_template import clean_resume_text, create_resume_document, create_resume_pdf
 
 
@@ -30,7 +32,7 @@ DEFAULT_MODEL = _ai_service.DEFAULT_MODEL
 ResumeOptimizationError = _ai_service.ResumeOptimizationError
 analyze_job_match = _ai_service.analyze_job_match
 classify_imported_resume = _ai_service.classify_imported_resume
-optimize_resume_text = _ai_service.optimize_resume_text
+optimize_resume_changes = _ai_service.optimize_resume_changes
 test_deepseek_connection = _ai_service.test_deepseek_connection
 
 
@@ -123,6 +125,7 @@ def _clear_derived_resume_state() -> None:
     """清空只属于某个简历版本的 AI 结果。"""
     st.session_state.pop("optimized_resume", None)
     st.session_state.pop("optimized_resume_editor", None)
+    st.session_state.pop("optimization_review", None)
     st.session_state.pop("job_match_result", None)
 
 
@@ -148,6 +151,9 @@ def _persist_active_job_version() -> None:
         "optimized_resume_editor",
         "",
     )
+    version["optimization_review"] = deepcopy(
+        st.session_state.get("optimization_review")
+    )
     version["job_match_result"] = st.session_state.get("job_match_result")
 
 
@@ -169,6 +175,9 @@ def _save_resume_to_current_workspace(resume: dict) -> bool:
                 "optimized_resume_editor",
                 "",
             )
+            version["optimization_review"] = deepcopy(
+                st.session_state.get("optimization_review")
+            )
             version["job_match_result"] = st.session_state.get("job_match_result")
             return True
 
@@ -187,6 +196,9 @@ def _restore_version_results(version: dict) -> None:
         st.session_state["optimized_resume"] = optimized_resume
     if optimized_editor:
         st.session_state["optimized_resume_editor"] = optimized_editor
+    optimization_review = version.get("optimization_review")
+    if optimization_review:
+        st.session_state["optimization_review"] = deepcopy(optimization_review)
     if version.get("job_match_result"):
         st.session_state["job_match_result"] = version["job_match_result"]
 
@@ -265,6 +277,7 @@ def _create_job_version(version_name: str, target_role: str, job_description: st
         "resume_data": version_resume,
         "optimized_resume": "",
         "optimized_resume_editor": "",
+        "optimization_review": None,
         "job_match_result": None,
     }
     _activate_job_version(version_id)
@@ -288,11 +301,12 @@ def _resume_library_json() -> bytes:
                     "optimized_resume_editor",
                     "",
                 ),
+                "optimization_review": version.get("optimization_review"),
                 "job_match_result": version.get("job_match_result"),
             }
         )
     backup = {
-        "schema_version": 1,
+        "schema_version": 2,
         "master_resume": {
             field_name: st.session_state.get("master_resume_data", {}).get(field_name, "")
             for field_name in FORM_FIELDS
@@ -306,6 +320,153 @@ def _handle_optimized_editor_change() -> None:
     """用户手动改了 AI 结果后，清除旧匹配并保存当前岗位版本。"""
     st.session_state.pop("job_match_result", None)
     _persist_active_job_version()
+
+
+def _refresh_reviewed_resume() -> str:
+    """按照当前逐条审阅决定重新生成最终采用稿。"""
+    review = st.session_state.get("optimization_review") or {}
+    final_text = clean_resume_text(
+        build_reviewed_resume_text(
+            st.session_state.get("resume_data", {}),
+            review.get("changes", []),
+            review.get("decisions", {}),
+        )
+    )
+    st.session_state["optimized_resume"] = final_text
+    st.session_state["optimized_resume_editor"] = final_text
+    return final_text
+
+
+def _install_optimization_review(changes: list[dict]) -> None:
+    """安装一组新的 AI 修改建议，默认全部处于待审阅状态。"""
+    st.session_state["optimization_review"] = {
+        "changes": deepcopy(changes),
+        "decisions": {change["id"]: "pending" for change in changes},
+    }
+    _refresh_reviewed_resume()
+    st.session_state.pop("job_match_result", None)
+    _persist_active_job_version()
+
+
+def _set_review_decision(change_id: str, decision: str) -> None:
+    """接受或拒绝单条建议，并同步更新导出用的最终稿。"""
+    if decision not in {"accepted", "rejected"}:
+        return
+    review = st.session_state.get("optimization_review") or {}
+    valid_ids = {
+        str(change.get("id", ""))
+        for change in review.get("changes", [])
+        if change.get("id")
+    }
+    if change_id not in valid_ids:
+        return
+    review.setdefault("decisions", {})[change_id] = decision
+    st.session_state["optimization_review"] = review
+    _refresh_reviewed_resume()
+    _persist_active_job_version()
+
+
+def _format_diff_fragments(fragments: list[str]) -> str:
+    cleaned = [fragment.strip() for fragment in fragments if fragment.strip()]
+    return "、".join(f"“{fragment}”" for fragment in cleaned) if cleaned else "无"
+
+
+def _render_optimization_review(review: dict) -> None:
+    """显示逐条原文对比，并提供独立接受和拒绝操作。"""
+    changes = review.get("changes", [])
+    decisions = review.get("decisions", {})
+    if not changes:
+        return
+
+    accepted_count = sum(
+        decisions.get(change.get("id")) == "accepted" for change in changes
+    )
+    rejected_count = sum(
+        decisions.get(change.get("id")) == "rejected" for change in changes
+    )
+    pending_count = len(changes) - accepted_count - rejected_count
+
+    st.divider()
+    st.subheader("AI 修改对比")
+    st.warning("AI 不得编造公司、项目、技能、证书和业绩数字。")
+    st.caption(
+        f"共 {len(changes)} 条建议，已接受 {accepted_count} 条，"
+        f"已拒绝 {rejected_count} 条，待审阅 {pending_count} 条。"
+        "只有明确接受的修改才会进入导出稿。"
+    )
+
+    status_labels = {
+        "pending": "待审阅",
+        "accepted": "已接受",
+        "rejected": "已拒绝",
+    }
+    for index, change in enumerate(changes, start=1):
+        change_id = str(change.get("id", f"change-{index}"))
+        decision = decisions.get(change_id, "pending")
+        with st.container(border=True):
+            st.markdown(f"#### {change.get('section', '简历内容')}：第 {index} 条")
+            st.caption(f"当前状态：{status_labels.get(decision, '待审阅')}")
+
+            original_column, revised_column = st.columns(2)
+            with original_column:
+                st.markdown("**原文**")
+                st.write(change.get("original_text", ""))
+            with revised_column:
+                st.markdown("**AI 修改后**")
+                st.write(change.get("revised_text", ""))
+
+            diff = text_diff_fragments(
+                str(change.get("original_text", "")),
+                str(change.get("revised_text", "")),
+            )
+            added_column, removed_column = st.columns(2)
+            with added_column:
+                st.markdown("**新增了什么**")
+                st.write(_format_diff_fragments(diff["added"]))
+            with removed_column:
+                st.markdown("**删除了什么**")
+                st.write(_format_diff_fragments(diff["removed"]))
+
+            st.markdown("**修改原因**")
+            st.write(change.get("reason", "未提供修改原因。"))
+
+            accept_column, reject_column = st.columns(2)
+            with accept_column:
+                accept_change = st.button(
+                    "接受这一条",
+                    key=f"accept_review_{change_id}",
+                    type="primary",
+                    disabled=decision == "accepted",
+                    use_container_width=True,
+                )
+            with reject_column:
+                reject_change = st.button(
+                    "拒绝这一条",
+                    key=f"reject_review_{change_id}",
+                    disabled=decision == "rejected",
+                    use_container_width=True,
+                )
+
+            if accept_change:
+                _set_review_decision(change_id, "accepted")
+                st.rerun()
+            if reject_change:
+                _set_review_decision(change_id, "rejected")
+                st.rerun()
+
+    if pending_count == 0:
+        st.success("所有建议都已审阅，导出将使用下面的当前采用稿。")
+    else:
+        st.info("未审阅的建议暂不采用，你可以稍后继续决定。")
+
+    with st.expander("查看当前采用稿", expanded=pending_count == 0):
+        st.text_area(
+            "当前采用稿（可继续修改）",
+            height=500,
+            key="optimized_resume_editor",
+            on_change=_handle_optimized_editor_change,
+        )
+        st.caption("如果再次更改接受或拒绝状态，系统会按最新决定重新合并这里的内容。")
 
 
 def _inject_brand_styles() -> None:
@@ -887,7 +1048,7 @@ def _show_suggestion_optimizer(
         height=100,
         key="suggestion_optimizer_extra_instruction",
     )
-    st.caption("AI 只会改写已有真实内容，不会自动补造经历、技能或数据。")
+    st.warning("AI 不得编造公司、项目、技能、证书和业绩数字。")
 
     if st.button("确认并开始优化", type="primary", use_container_width=True):
         if not api_key.strip():
@@ -899,20 +1060,15 @@ def _show_suggestion_optimizer(
             guidance_parts.extend(["", "用户补充要求：", extra_instruction.strip()])
 
         try:
-            with st.spinner("AI 正在根据建议优化简历，请稍候……"):
-                optimized_resume = clean_resume_text(
-                    optimize_resume_text(
-                        resume_data,
-                        api_key,
-                        optimization_guidance="\n".join(guidance_parts),
-                    )
+            with st.spinner("AI 正在根据建议生成逐条修改对比，请稍候……"):
+                changes = optimize_resume_changes(
+                    resume_data,
+                    api_key,
+                    optimization_guidance="\n".join(guidance_parts),
                 )
-            st.session_state["optimized_resume"] = optimized_resume
-            st.session_state["optimized_resume_editor"] = optimized_resume
-            st.session_state.pop("job_match_result", None)
-            _persist_active_job_version()
+            _install_optimization_review(changes)
             st.session_state["suggestion_optimization_notice"] = (
-                "已根据 JD 匹配建议完成优化，请检查下面的 AI 优化结果。"
+                f"已生成 {len(changes)} 条修改建议，请逐条接受或拒绝。"
             )
             st.rerun()
         except ResumeOptimizationError as error:
@@ -1484,6 +1640,7 @@ if resume_data:
     st.divider()
     st.subheader("AI 优化")
     st.caption("只发送目标岗位和经历文本；姓名、手机、邮箱、城市不会发送给 AI。")
+    st.warning("AI 不得编造公司、项目、技能、证书和业绩数字。")
 
     optimization_notice = st.session_state.pop("suggestion_optimization_notice", None)
     if optimization_notice:
@@ -1527,22 +1684,21 @@ if resume_data:
             st.warning("请先在左侧填写 DeepSeek API Key。")
         else:
             try:
-                with st.spinner("AI 正在优化，请稍候……"):
-                    optimized_resume = clean_resume_text(
-                        optimize_resume_text(resume_data, api_key)
-                    )
-                st.session_state["optimized_resume"] = optimized_resume
-                st.session_state["optimized_resume_editor"] = optimized_resume
-                st.session_state.pop("job_match_result", None)
-                _persist_active_job_version()
-                st.success("AI 优化完成，你可以继续修改结果。")
+                with st.spinner("AI 正在生成逐条修改对比，请稍候……"):
+                    changes = optimize_resume_changes(resume_data, api_key)
+                _install_optimization_review(changes)
+                st.success(f"已生成 {len(changes)} 条修改建议，请逐条接受或拒绝。")
             except ResumeOptimizationError as error:
                 st.error(str(error))
 
+optimization_review = st.session_state.get("optimization_review")
 optimized_resume = st.session_state.get("optimized_resume")
-if optimized_resume:
+if optimization_review:
+    _render_optimization_review(optimization_review)
+elif optimized_resume:
     st.divider()
-    st.subheader("AI 优化结果")
+    st.subheader("旧版 AI 优化结果")
+    st.caption("这是旧会话生成的整篇结果。重新运行 AI 优化后，将显示逐条修改对比。")
     st.text_area(
         "可以在这里继续修改",
         height=500,
@@ -1560,7 +1716,10 @@ if resume_data:
         st.caption("当前导出：主简历")
     final_resume_text = st.session_state.get("optimized_resume_editor", "").strip()
     if final_resume_text:
-        st.success("将导出 AI 优化后的最终内容。")
+        if optimization_review:
+            st.success("将导出逐条审阅后的当前采用稿。")
+        else:
+            st.success("将导出 AI 优化后的最终内容。")
     else:
         st.info("还没有 AI 优化结果，将导出你填写的原始内容。")
 
