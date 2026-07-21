@@ -15,7 +15,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_LEFT
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
@@ -37,12 +37,26 @@ from reportlab.platypus import (
 
 CHINESE_FONT = "STSong-Light"
 EMBEDDED_CHINESE_FONT = "ResumeChinese"
+EMBEDDED_CHINESE_BOLD_FONT = "ResumeChineseBold"
 FONT_CANDIDATES = (
     Path(r"C:\Windows\Fonts\msyh.ttc"),
     Path(r"C:\Windows\Fonts\simhei.ttf"),
     Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
     Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
 )
+BOLD_FONT_CANDIDATES = (
+    Path(r"C:\Windows\Fonts\msyhbd.ttc"),
+    Path(r"C:\Windows\Fonts\simhei.ttf"),
+    Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
+    Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
+)
+PDF_NAVY = colors.HexColor("#123E67")
+PDF_BLUE = colors.HexColor("#2E6FA6")
+PDF_LIGHT_BLUE = colors.HexColor("#EAF3FB")
+PDF_PALE_BLUE = colors.HexColor("#F5F9FD")
+PDF_BORDER_BLUE = colors.HexColor("#C7DBEB")
+PDF_TEXT = colors.HexColor("#1F2A37")
+PDF_MUTED = colors.HexColor("#5B6B7E")
 SECTION_LABELS = {
     "职业概述": "个人简介",
     "个人简介": "个人简介",
@@ -316,6 +330,32 @@ def _register_pdf_font() -> str:
     return CHINESE_FONT
 
 
+def _register_pdf_fonts() -> tuple[str, str]:
+    """注册屏幕和打印都清晰的中文常规/粗体字体。"""
+    regular_font = _register_pdf_font()
+    try:
+        pdfmetrics.getFont(EMBEDDED_CHINESE_BOLD_FONT)
+        return regular_font, EMBEDDED_CHINESE_BOLD_FONT
+    except KeyError:
+        pass
+
+    for font_path in BOLD_FONT_CANDIDATES:
+        if not font_path.is_file():
+            continue
+        try:
+            pdfmetrics.registerFont(
+                TTFont(
+                    EMBEDDED_CHINESE_BOLD_FONT,
+                    str(font_path),
+                    subfontIndex=0,
+                )
+            )
+            return regular_font, EMBEDDED_CHINESE_BOLD_FONT
+        except Exception:
+            continue
+    return regular_font, regular_font
+
+
 def _pdf_photo(photo_bytes: bytes) -> PdfImage:
     photo_buffer = BytesIO(photo_bytes)
     image_reader = ImageReader(photo_buffer)
@@ -343,12 +383,12 @@ class SectionIcon(Flowable):
         center = self.width / 2
         radius = 4.6 * mm
         canvas.saveState()
-        canvas.setFillColor(colors.HexColor("#E2F3EF"))
-        canvas.setStrokeColor(colors.HexColor("#5BAE9E"))
+        canvas.setFillColor(PDF_LIGHT_BLUE)
+        canvas.setStrokeColor(colors.HexColor("#9FC3E1"))
         canvas.setLineWidth(0.7)
         canvas.circle(center, self.height / 2, radius, fill=1, stroke=1)
-        canvas.setStrokeColor(colors.HexColor("#327C70"))
-        canvas.setFillColor(colors.HexColor("#327C70"))
+        canvas.setStrokeColor(PDF_BLUE)
+        canvas.setFillColor(PDF_BLUE)
         canvas.setLineWidth(1.05)
 
         if self.kind == "education":
@@ -390,36 +430,38 @@ def _pdf_section_heading(title: str, kind: str, style, width: float) -> Table:
     )
     heading.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F0F8F6")),
-        ("BOX", (0, 0), (-1, -1), 0.55, colors.HexColor("#CDE7E1")),
-        ("LEFTPADDING", (0, 0), (0, 0), 4),
+        ("BACKGROUND", (0, 0), (-1, -1), PDF_PALE_BLUE),
+        ("BOX", (0, 0), (-1, -1), 0.55, PDF_BORDER_BLUE),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.8, colors.HexColor("#A9C8E2")),
+        ("LEFTPADDING", (0, 0), (0, 0), 5),
         ("RIGHTPADDING", (0, 0), (0, 0), 1),
-        ("LEFTPADDING", (1, 0), (1, 0), 2),
+        ("LEFTPADDING", (1, 0), (1, 0), 3),
         ("RIGHTPADDING", (1, 0), (1, 0), 6),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
     ]))
     return heading
 
 
 def _draw_pdf_page(canvas, doc, pdf_font: str) -> None:
-    """绘制适合打印的浅色背景和页码。"""
+    """绘制蓝白商务背景、克制的几何图案和页码。"""
     canvas.saveState()
     page_width, page_height = A4
-    canvas.setFillColor(colors.HexColor("#FAFCFB"))
+    canvas.setFillColor(colors.white)
     canvas.rect(0, 0, page_width, page_height, fill=1, stroke=0)
-    canvas.setFillColor(colors.HexColor("#EAF6F2"))
-    canvas.rect(0, 0, 7 * mm, page_height, fill=1, stroke=0)
-    canvas.setFillColor(colors.HexColor("#EEF7FA"))
-    canvas.circle(page_width - 13 * mm, page_height - 15 * mm, 30 * mm, fill=1, stroke=0)
-    canvas.setFillColor(colors.HexColor("#F1F8F6"))
-    canvas.circle(-9 * mm, 18 * mm, 25 * mm, fill=1, stroke=0)
-    canvas.setStrokeColor(colors.HexColor("#D7ECE7"))
-    canvas.setLineWidth(0.7)
-    canvas.line(14 * mm, page_height - 8 * mm, page_width - 17 * mm, page_height - 8 * mm)
+    canvas.setFillColor(PDF_NAVY)
+    canvas.rect(0, page_height - 4 * mm, page_width, 4 * mm, fill=1, stroke=0)
+    canvas.setFillColor(colors.HexColor("#EDF5FB"))
+    canvas.circle(page_width + 5 * mm, page_height - 18 * mm, 26 * mm, fill=1, stroke=0)
+    canvas.setFillColor(colors.HexColor("#F4F8FC"))
+    canvas.circle(-8 * mm, 17 * mm, 22 * mm, fill=1, stroke=0)
+    canvas.setStrokeColor(PDF_BORDER_BLUE)
+    canvas.setLineWidth(0.6)
+    canvas.line(16 * mm, 12 * mm, page_width - 16 * mm, 12 * mm)
     canvas.setFont(pdf_font, 8)
-    canvas.setFillColor(colors.HexColor("#6A8580"))
-    canvas.drawCentredString(page_width / 2, 8 * mm, f"第 {doc.page} 页")
+    canvas.setFillColor(PDF_MUTED)
+    canvas.drawString(17 * mm, 7.5 * mm, "个人简历")
+    canvas.drawRightString(page_width - 17 * mm, 7.5 * mm, f"第 {doc.page} 页")
     canvas.restoreState()
 
 
@@ -428,64 +470,118 @@ def create_resume_pdf(
     optimized_text: str | None = None,
     photo_bytes: bytes | None = None,
 ) -> bytes:
-    """生成招聘网站风格的完整中文 PDF 简历。"""
-    pdf_font = _register_pdf_font()
+    """生成蓝白商务风格、适合招聘阅读和打印的中文 PDF 简历。"""
+    pdf_font, pdf_bold_font = _register_pdf_fonts()
     output = BytesIO()
     document = SimpleDocTemplate(
         output,
         pagesize=A4,
-        rightMargin=17 * mm,
-        leftMargin=17 * mm,
-        topMargin=14 * mm,
+        rightMargin=16 * mm,
+        leftMargin=16 * mm,
+        topMargin=12 * mm,
         bottomMargin=16 * mm,
         title=f"{_plain(resume_data.get('name'))}的简历",
         author=_plain(resume_data.get("name")),
     )
     styles = getSampleStyleSheet()
+    document_title_style = ParagraphStyle(
+        "ResumeDocumentTitle",
+        parent=styles["Title"],
+        fontName=pdf_bold_font,
+        fontSize=15,
+        leading=19,
+        alignment=TA_CENTER,
+        textColor=colors.white,
+        spaceAfter=0,
+    )
     name_style = ParagraphStyle(
-        "ResumeName", parent=styles["Title"], fontName=pdf_font,
-        fontSize=22, leading=27, alignment=TA_LEFT,
-        textColor=colors.HexColor("#172B4D"), spaceAfter=4,
+        "ResumeName", parent=styles["Title"], fontName=pdf_bold_font,
+        fontSize=23, leading=28, alignment=TA_LEFT,
+        textColor=PDF_NAVY, spaceAfter=4,
     )
     role_style = ParagraphStyle(
-        "ResumeRole", parent=styles["Normal"], fontName=pdf_font,
-        fontSize=10.5, leading=15, textColor=colors.HexColor("#46566B"),
+        "ResumeRole", parent=styles["Normal"], fontName=pdf_bold_font,
+        fontSize=10.8, leading=16, textColor=PDF_BLUE, spaceAfter=2,
+    )
+    contact_style = ParagraphStyle(
+        "ResumeContact", parent=styles["Normal"], fontName=pdf_font,
+        fontSize=9.4, leading=14.5, textColor=PDF_MUTED,
     )
     heading_style = ParagraphStyle(
-        "ResumeHeading", parent=styles["Heading2"], fontName=pdf_font,
-        fontSize=12.5, leading=17, textColor=colors.HexColor("#276D63"),
+        "ResumeHeading", parent=styles["Heading2"], fontName=pdf_bold_font,
+        fontSize=12.5, leading=17, textColor=PDF_NAVY,
         spaceBefore=0, spaceAfter=0,
     )
     body_style = ParagraphStyle(
         "ResumeBody", parent=styles["BodyText"], fontName=pdf_font,
-        fontSize=10.2, leading=15.2, alignment=TA_LEFT,
-        textColor=colors.HexColor("#202938"), spaceAfter=3, wordWrap="CJK",
+        fontSize=10.4, leading=16.2, alignment=TA_LEFT,
+        textColor=PDF_TEXT, spaceAfter=4.2, wordWrap="CJK",
+        splitLongWords=False, allowWidows=0, allowOrphans=0,
+    )
+    entry_style = ParagraphStyle(
+        "ResumeEntry", parent=body_style, fontName=pdf_bold_font,
+        textColor=colors.HexColor("#243B53"),
+        spaceBefore=0.8, spaceAfter=3.6,
+    )
+    bullet_style = ParagraphStyle(
+        "ResumeBullet", parent=body_style,
+        leftIndent=5 * mm, firstLineIndent=0,
+        bulletIndent=1.2 * mm, bulletFontName=pdf_bold_font,
+        bulletFontSize=6.5, bulletColor=PDF_BLUE,
+        spaceAfter=3.6,
     )
 
     header_items = [
-        Paragraph(html.escape(_plain(resume_data.get("name")) or "个人简历"), name_style),
+        Paragraph(html.escape(_plain(resume_data.get("name")) or "姓名"), name_style),
         Paragraph(html.escape(f"目标岗位：{_plain(resume_data.get('target_role'))}"), role_style),
     ]
     contact = _contact_line(resume_data)
     if contact:
-        header_items.append(Paragraph(html.escape(contact), role_style))
+        header_items.append(Paragraph(html.escape(contact), contact_style))
 
-    story = [Spacer(1, 1 * mm)]
+    title_bar = Table(
+        [[Paragraph("简历", document_title_style)]],
+        colWidths=[document.width],
+    )
+    title_bar.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), PDF_NAVY),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 4.2 * mm),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4.2 * mm),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+    ]))
+
+    story = [title_bar, Spacer(1, 2.5 * mm)]
     if photo_bytes:
-        header = Table([[header_items, _pdf_photo(photo_bytes)]], colWidths=[document.width - 34 * mm, 34 * mm])
-        header.setStyle(TableStyle([
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("ALIGN", (1, 0), (1, 0), "RIGHT"),
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F4F7FB")),
-            ("LEFTPADDING", (0, 0), (-1, -1), 7),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 7),
-            ("TOPPADDING", (0, 0), (-1, -1), 7),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#D7E2EE")),
-        ]))
-        story.extend([header, Spacer(1, 3 * mm)])
+        header = Table(
+            [[header_items, _pdf_photo(photo_bytes)]],
+            colWidths=[document.width - 34 * mm, 34 * mm],
+        )
     else:
-        story.extend(header_items + [Spacer(1, 3 * mm)])
+        header = Table([[header_items]], colWidths=[document.width])
+    header_commands = [
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("BACKGROUND", (0, 0), (-1, -1), PDF_PALE_BLUE),
+        ("LEFTPADDING", (0, 0), (-1, -1), 7 * mm),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 7 * mm),
+        ("TOPPADDING", (0, 0), (-1, -1), 5.5 * mm),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5.5 * mm),
+        ("BOX", (0, 0), (-1, -1), 0.65, PDF_BORDER_BLUE),
+        ("LINEBELOW", (0, 0), (-1, -1), 1.2, PDF_BLUE),
+    ]
+    if photo_bytes:
+        header_commands.extend([
+            ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+            ("LINEBEFORE", (1, 0), (1, 0), 0.5, PDF_BORDER_BLUE),
+            ("LEFTPADDING", (1, 0), (1, 0), 2.5 * mm),
+            ("RIGHTPADDING", (1, 0), (1, 0), 2.5 * mm),
+            ("TOPPADDING", (1, 0), (1, 0), 2.5 * mm),
+            ("BOTTOMPADDING", (1, 0), (1, 0), 2.5 * mm),
+        ])
+    header.setStyle(TableStyle(header_commands))
+    story.extend([header, Spacer(1, 3.2 * mm)])
 
     section_kinds = {
         "个人简介": "summary",
@@ -494,21 +590,56 @@ def create_resume_pdf(
         "项目经历": "project",
         "技能证书": "skills",
     }
+    current_heading: Table | None = None
+    current_section_flowables: list[Flowable] = []
+    section_groups: list[tuple[Table, list[Flowable]]] = []
     for block_type, text in _content_blocks(resume_data, optimized_text):
         safe_text = html.escape(text)
         if block_type == "heading":
-            story.append(KeepTogether([
-                _pdf_section_heading(
-                    text,
-                    section_kinds.get(text, "summary"),
-                    heading_style,
-                    document.width,
-                )
-            ]))
+            if current_heading is not None:
+                section_groups.append((current_heading, current_section_flowables))
+            current_heading = _pdf_section_heading(
+                text,
+                section_kinds.get(text, "summary"),
+                heading_style,
+                document.width,
+            )
+            current_section_flowables = []
         elif block_type == "bullet":
-            story.append(Paragraph(html.escape(f"· {text}"), body_style))
+            content_flowable = Paragraph(safe_text, bullet_style, bulletText="●")
+            if current_heading is not None:
+                current_section_flowables.append(content_flowable)
+            else:
+                story.append(content_flowable)
         else:
-            story.append(Paragraph(safe_text, body_style))
+            is_entry_line = bool(
+                re.match(r"^(?:19|20)\d{2}(?:[./-]|年)", text)
+                or ("｜" in text and len(text) <= 60)
+            )
+            content_flowable = Paragraph(
+                safe_text,
+                entry_style if is_entry_line else body_style,
+            )
+            if current_heading is not None:
+                current_section_flowables.append(content_flowable)
+            else:
+                story.append(content_flowable)
+    if current_heading is not None:
+        section_groups.append((current_heading, current_section_flowables))
+
+    for section_heading, section_flowables in section_groups:
+        section_prefix: list[Flowable] = [
+            Spacer(1, 2.7 * mm),
+            section_heading,
+            Spacer(1, 1.5 * mm),
+        ]
+        if not section_flowables:
+            story.extend(section_prefix)
+        elif len(section_flowables) <= 7:
+            story.append(KeepTogether(section_prefix + section_flowables))
+        else:
+            story.append(KeepTogether(section_prefix + [section_flowables[0]]))
+            story.extend(section_flowables[1:])
 
     document.build(
         story,

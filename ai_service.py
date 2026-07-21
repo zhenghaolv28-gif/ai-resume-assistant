@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import ssl
 import subprocess
@@ -369,6 +370,32 @@ MATCH_SYSTEM_INSTRUCTIONS = """
 """.strip()
 
 
+IMPORT_STRUCTURE_SYSTEM_INSTRUCTIONS = """
+你是一名严谨的中文简历信息归类助手。请把用户提供的原始简历文字，按语义归入指定字段。
+
+必须遵守：
+1. 只做归类，不润色、不改写、不总结、不补充事实。
+2. 每一条原文只能出现在一个字段中，严禁把同一段复制到多个字段。
+3. 工作经历只放正式工作、实习、任职内容；项目经历只放项目、作品、实践、科研项目内容。
+4. 教育经历只放学校、专业、学历、毕业时间和教育相关内容。
+5. 技能与证书只放技能、工具、语言、证书、培训、奖项和荣誉。
+6. 自我介绍只放个人概述、优势、职业简介等内容。
+7. 章节标题本身不要写入字段正文；无法判断的内容放入 unclassified，不要猜测。
+8. 保留原文事实和换行，输出中文纯文本。
+
+只返回一个 JSON 对象，不要 Markdown，不要解释：
+{
+  "target_role": "",
+  "summary": "",
+  "education": "",
+  "work_experience": "",
+  "project_experience": "",
+  "skills": "",
+  "unclassified": ""
+}
+""".strip()
+
+
 def _build_job_match_input(
     resume_data: dict,
     current_resume_text: str = "",
@@ -483,3 +510,124 @@ def analyze_job_match(
         raise
     except (ValueError, KeyError, TypeError, IndexError) as exc:
         raise ResumeOptimizationError("DeepSeek 返回了无法识别的 JD 匹配结果。") from exc
+
+
+IMPORT_STRUCTURE_FIELDS = (
+    "target_role",
+    "summary",
+    "education",
+    "work_experience",
+    "project_experience",
+    "skills",
+    "unclassified",
+)
+
+
+def _redact_imported_resume_text(
+    raw_text: str,
+    sensitive_values: list[str] | None = None,
+) -> str:
+    """在发送给 AI 前隐藏姓名、电话、邮箱和城市。"""
+    redacted = raw_text
+    redacted = re.sub(
+        r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b",
+        "[电子邮箱已隐藏]",
+        redacted,
+    )
+    redacted = re.sub(
+        r"(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d{9}(?!\d)",
+        "[手机号码已隐藏]",
+        redacted,
+    )
+    values = sorted(
+        {
+            str(value).strip()
+            for value in (sensitive_values or [])
+            if len(str(value).strip()) >= 2
+        },
+        key=len,
+        reverse=True,
+    )
+    for value in values:
+        redacted = redacted.replace(value, "[个人信息已隐藏]")
+    return redacted.strip()
+
+
+def _structured_text_value(value: object) -> str:
+    if isinstance(value, list):
+        return "\n".join(str(item).strip() for item in value if str(item).strip())
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _parse_import_structure_result(content: str) -> dict[str, str]:
+    """解析 AI 归类结果，并去除字段之间的重复行。"""
+    start = content.find("{")
+    end = content.rfind("}")
+    if start < 0 or end <= start:
+        raise ResumeOptimizationError("AI 没有返回有效的简历归类结果，请重试。")
+    try:
+        raw_result = json.loads(content[start : end + 1])
+        if not isinstance(raw_result, dict):
+            raise ValueError("归类结果不是 JSON 对象")
+    except (json.JSONDecodeError, ValueError, TypeError) as exc:
+        raise ResumeOptimizationError("AI 返回的简历归类格式不正确，请重试。") from exc
+
+    result: dict[str, str] = {}
+    lines_seen: set[str] = set()
+    for field_name in IMPORT_STRUCTURE_FIELDS:
+        value = _structured_text_value(raw_result.get(field_name, ""))
+        unique_lines: list[str] = []
+        for line in value.splitlines():
+            cleaned_line = line.strip()
+            if not cleaned_line:
+                continue
+            comparison_key = re.sub(r"[\s，,。；;：:·•\-—_]+", "", cleaned_line).lower()
+            if len(comparison_key) >= 6 and comparison_key in lines_seen:
+                continue
+            if len(comparison_key) >= 6:
+                lines_seen.add(comparison_key)
+            unique_lines.append(cleaned_line)
+        result[field_name] = "\n".join(unique_lines).strip()
+    return result
+
+
+def classify_imported_resume(
+    raw_text: str,
+    api_key: str,
+    sensitive_values: list[str] | None = None,
+    model: str = DEFAULT_MODEL,
+) -> dict[str, str]:
+    """使用 DeepSeek 将脱敏后的原始简历按语义归入标准章节。"""
+    cleaned_key = api_key.strip()
+    if not cleaned_key:
+        raise ResumeOptimizationError("请先在左侧填写 DeepSeek API Key。")
+    safe_text = _redact_imported_resume_text(raw_text, sensitive_values)
+    if len(safe_text) < 10:
+        raise ResumeOptimizationError("没有足够的简历文字可供 AI 识别。")
+
+    try:
+        response = _request_deepseek(
+            "POST",
+            "/chat/completions",
+            cleaned_key,
+            json_body={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": IMPORT_STRUCTURE_SYSTEM_INSTRUCTIONS},
+                    {"role": "user", "content": safe_text},
+                ],
+                "max_tokens": 2600,
+                "stream": False,
+                "thinking": {"type": "disabled"},
+            },
+        )
+        content = (
+            response.json()["choices"][0]["message"].get("content") or ""
+        ).strip()
+        return _parse_import_structure_result(content)
+    except ResumeOptimizationError:
+        raise
+    except (ValueError, KeyError, TypeError, IndexError) as exc:
+        raise ResumeOptimizationError("DeepSeek 返回了无法识别的简历归类结果。") from exc
