@@ -451,9 +451,6 @@ def create_resume_document(
             paragraph.paragraph_format.space_after = Pt(3)
             _word_text(paragraph, text, color=text_color)
 
-    footer = section.footer.paragraphs[0]
-    footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    _word_text(footer, f"个人简历 ｜ {template['name']}", 8, False, muted)
     output = BytesIO()
     document.save(output)
     return output.getvalue()
@@ -615,7 +612,6 @@ def _draw_pdf_page(canvas, doc, pdf_font: str, template: dict) -> None:
     canvas.line(16 * mm, 12 * mm, page_width - 16 * mm, 12 * mm)
     canvas.setFont(pdf_font, 8)
     canvas.setFillColor(colors.HexColor(template["muted"]))
-    canvas.drawString(17 * mm, 7.5 * mm, f"个人简历 ｜ {template['name']}")
     canvas.drawRightString(page_width - 17 * mm, 7.5 * mm, f"第 {doc.page} 页")
     canvas.restoreState()
 

@@ -61,7 +61,8 @@ def test_every_template_generates_readable_pdf_and_word():
         assert "简历" in text
         assert "林晓然" in text
         assert "工作经历" in text
-        assert template_name in text
+        assert f"个人简历 ｜ {template_name}" not in text
+        assert template_name not in text
 
         word_bytes = create_resume_document(SAMPLE_RESUME, template_id=template_id)
         document = Document(BytesIO(word_bytes))
@@ -75,6 +76,13 @@ def test_every_template_generates_readable_pdf_and_word():
         )
         assert "林晓然" in document_text
         assert "目标岗位：产品经理" in document_text
+        footer_text = "\n".join(
+            paragraph.text
+            for section in document.sections
+            for paragraph in section.footer.paragraphs
+        )
+        assert f"个人简历 ｜ {template_name}" not in footer_text
+        assert template_name not in footer_text
 
     assert len({pdf_bytes for pdf_bytes in generated_pdfs}) == 4
 
