@@ -13,7 +13,15 @@ from dotenv import load_dotenv
 
 from resume_import import extract_resume_text_with_details, parse_resume_text
 from resume_review import build_reviewed_resume_text, text_diff_fragments
-from resume_template import clean_resume_text, create_resume_document, create_resume_pdf
+from resume_template import (
+    DEFAULT_TEMPLATE_ID,
+    clean_resume_text,
+    create_resume_document,
+    create_resume_pdf,
+    create_resume_preview_html,
+    resume_template_description,
+    resume_template_options,
+)
 
 
 def _load_ai_service_from_file():
@@ -95,6 +103,11 @@ def _copy_resume_data(resume: dict | None) -> dict:
         for field_name in FORM_FIELDS
     }
     copied["photo_bytes"] = source.get("photo_bytes")
+    template_options = resume_template_options()
+    selected_template = str(source.get("template_id", DEFAULT_TEMPLATE_ID))
+    copied["template_id"] = (
+        selected_template if selected_template in template_options else DEFAULT_TEMPLATE_ID
+    )
     return copied
 
 
@@ -295,6 +308,11 @@ def _resume_library_json() -> bytes:
                 "resume_data": {
                     field_name: version.get("resume_data", {}).get(field_name, "")
                     for field_name in FORM_FIELDS
+                }
+                | {
+                    "template_id": version.get("resume_data", {}).get(
+                        "template_id", DEFAULT_TEMPLATE_ID
+                    )
                 },
                 "optimized_resume": version.get("optimized_resume", ""),
                 "optimized_resume_editor": version.get(
@@ -310,6 +328,11 @@ def _resume_library_json() -> bytes:
         "master_resume": {
             field_name: st.session_state.get("master_resume_data", {}).get(field_name, "")
             for field_name in FORM_FIELDS
+        }
+        | {
+            "template_id": st.session_state.get("master_resume_data", {}).get(
+                "template_id", DEFAULT_TEMPLATE_ID
+            )
         },
         "job_versions": versions,
     }
@@ -981,6 +1004,7 @@ def _master_resume_json(resume: dict) -> bytes:
         field_name: resume.get(field_name, "")
         for field_name in FORM_FIELDS
     }
+    backup["template_id"] = resume.get("template_id", DEFAULT_TEMPLATE_ID)
     return json.dumps(backup, ensure_ascii=False, indent=2).encode("utf-8")
 
 
@@ -1732,11 +1756,42 @@ elif optimized_resume:
 
 if resume_data:
     st.divider()
-    st.subheader("导出简历")
+    st.subheader("专业模板与实时预览")
     if workspace_mode == "job" and active_version:
         st.caption(f"当前导出：岗位版本“{active_version.get('name', '未命名版本')}”")
     else:
         st.caption("当前导出：主简历")
+
+    template_options = resume_template_options()
+    current_template_id = resume_data.get("template_id", DEFAULT_TEMPLATE_ID)
+    if current_template_id not in template_options:
+        current_template_id = DEFAULT_TEMPLATE_ID
+    workspace_identity = (
+        st.session_state.get("active_job_version_id")
+        if workspace_mode == "job"
+        else "master"
+    )
+    template_widget_key = f"resume_template_selector_{workspace_identity}"
+    if template_widget_key not in st.session_state:
+        st.session_state[template_widget_key] = current_template_id
+    selected_template_id = st.selectbox(
+        "选择专业简历模板",
+        options=list(template_options),
+        format_func=lambda template_id: template_options[template_id],
+        key=template_widget_key,
+    )
+    st.caption(resume_template_description(selected_template_id))
+
+    if selected_template_id != resume_data.get("template_id"):
+        updated_resume = _copy_resume_data(resume_data)
+        updated_resume["template_id"] = selected_template_id
+        st.session_state["resume_data"] = updated_resume
+        resume_data = updated_resume
+        if workspace_mode == "job" and active_version:
+            active_version["resume_data"] = _copy_resume_data(updated_resume)
+        else:
+            st.session_state["master_resume_data"] = _copy_resume_data(updated_resume)
+
     final_resume_text = st.session_state.get("optimized_resume_editor", "").strip()
     if final_resume_text:
         if optimization_review:
@@ -1746,16 +1801,31 @@ if resume_data:
     else:
         st.info("还没有 AI 优化结果，将导出你填写的原始内容。")
 
+    st.markdown(
+        create_resume_preview_html(
+            resume_data,
+            optimized_text=final_resume_text or None,
+            photo_bytes=resume_data.get("photo_bytes"),
+            template_id=selected_template_id,
+        ),
+        unsafe_allow_html=True,
+    )
+    st.caption("预览会随模板和内容即时更新。最终分页以导出的 Word 或 PDF 为准。")
+
+    st.subheader("导出文件")
+
     try:
         word_bytes = create_resume_document(
             resume_data,
             optimized_text=final_resume_text or None,
             photo_bytes=resume_data.get("photo_bytes"),
+            template_id=selected_template_id,
         )
         pdf_bytes = create_resume_pdf(
             resume_data,
             optimized_text=final_resume_text or None,
             photo_bytes=resume_data.get("photo_bytes"),
+            template_id=selected_template_id,
         )
         safe_name = "".join(
             character

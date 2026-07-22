@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from base64 import b64encode
 from io import BytesIO
 import html
 from pathlib import Path
@@ -50,13 +51,57 @@ BOLD_FONT_CANDIDATES = (
     Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
     Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
 )
-PDF_NAVY = colors.HexColor("#123E67")
-PDF_BLUE = colors.HexColor("#2E6FA6")
-PDF_LIGHT_BLUE = colors.HexColor("#EAF3FB")
-PDF_PALE_BLUE = colors.HexColor("#F5F9FD")
-PDF_BORDER_BLUE = colors.HexColor("#C7DBEB")
-PDF_TEXT = colors.HexColor("#1F2A37")
-PDF_MUTED = colors.HexColor("#5B6B7E")
+DEFAULT_TEMPLATE_ID = "business_blue"
+RESUME_TEMPLATES = {
+    "business_blue": {
+        "name": "蓝白商务",
+        "description": "稳重清晰，适合大多数企业与通用岗位",
+        "primary": "#123E67",
+        "accent": "#2E6FA6",
+        "soft": "#EAF3FB",
+        "pale": "#F5F9FD",
+        "border": "#C7DBEB",
+        "text": "#1F2A37",
+        "muted": "#5B6B7E",
+        "header_mode": "light",
+    },
+    "minimal_mono": {
+        "name": "黑白极简",
+        "description": "留白克制，适合法律、咨询、研究与传统行业",
+        "primary": "#18181B",
+        "accent": "#3F3F46",
+        "soft": "#F4F4F5",
+        "pale": "#FAFAFA",
+        "border": "#D4D4D8",
+        "text": "#18181B",
+        "muted": "#52525B",
+        "header_mode": "line",
+    },
+    "executive_navy": {
+        "name": "深蓝高管",
+        "description": "沉稳有分量，适合管理、金融与资深专业岗位",
+        "primary": "#102A43",
+        "accent": "#D4A72C",
+        "soft": "#E8EEF4",
+        "pale": "#F3F6F9",
+        "border": "#B9C7D5",
+        "text": "#172B3A",
+        "muted": "#526779",
+        "header_mode": "dark",
+    },
+    "modern_teal": {
+        "name": "青绿现代",
+        "description": "清新理性，适合产品、设计、技术与创新团队",
+        "primary": "#155E63",
+        "accent": "#0F8B8D",
+        "soft": "#DDF3F1",
+        "pale": "#F1FAF9",
+        "border": "#B9DEDB",
+        "text": "#183536",
+        "muted": "#526A6B",
+        "header_mode": "light",
+    },
+}
 SECTION_LABELS = {
     "职业概述": "个人简介",
     "个人简介": "个人简介",
@@ -78,6 +123,20 @@ RAW_SECTIONS = (
 )
 ALLOWED_SYMBOLS = set("+-@./\\%&")
 MARKDOWN_SYMBOLS = set("*_`~#")
+
+
+def _template(template_id: str | None) -> dict:
+    """返回可用模板，未知值回退到默认模板。"""
+    return RESUME_TEMPLATES.get(str(template_id or ""), RESUME_TEMPLATES[DEFAULT_TEMPLATE_ID])
+
+
+def resume_template_options() -> dict[str, str]:
+    """返回模板标识与界面显示名称。"""
+    return {template_id: config["name"] for template_id, config in RESUME_TEMPLATES.items()}
+
+
+def resume_template_description(template_id: str | None) -> str:
+    return _template(template_id)["description"]
 
 
 def _clean_line(text: str, preserve_bullet: bool = True) -> str:
@@ -176,6 +235,89 @@ def _contact_line(resume_data: dict) -> str:
     return " ｜ ".join(item for item in items if item)
 
 
+def create_resume_preview_html(
+    resume_data: dict,
+    optimized_text: str | None = None,
+    photo_bytes: bytes | None = None,
+    template_id: str = DEFAULT_TEMPLATE_ID,
+) -> str:
+    """生成与导出模板共享内容和配色的实时 HTML 预览。"""
+    template = _template(template_id)
+    name = html.escape(_plain(resume_data.get("name")) or "姓名")
+    role = html.escape(_plain(resume_data.get("target_role")) or "目标岗位")
+    contact = html.escape(_contact_line(resume_data))
+    photo_html = ""
+    if photo_bytes:
+        encoded_photo = b64encode(photo_bytes).decode("ascii")
+        photo_html = (
+            '<img class="resume-preview-photo" '
+            f'src="data:image/jpeg;base64,{encoded_photo}" alt="简历照片">'
+        )
+
+    body_parts: list[str] = []
+    for block_type, text in _content_blocks(resume_data, optimized_text):
+        safe_text = html.escape(text)
+        if block_type == "heading":
+            body_parts.append(f'<h3 class="resume-preview-section">{safe_text}</h3>')
+        elif block_type == "bullet":
+            body_parts.append(f'<p class="resume-preview-bullet">{safe_text}</p>')
+        else:
+            body_parts.append(f'<p class="resume-preview-paragraph">{safe_text}</p>')
+
+    header_mode = template["header_mode"]
+    header_class = f"resume-preview-header resume-preview-header-{header_mode}"
+    return f"""
+<div class="resume-preview-shell" style="
+    --resume-primary:{template['primary']};
+    --resume-accent:{template['accent']};
+    --resume-soft:{template['soft']};
+    --resume-pale:{template['pale']};
+    --resume-border:{template['border']};
+    --resume-text:{template['text']};
+    --resume-muted:{template['muted']};">
+  <style>
+    .resume-preview-shell {{ width: 100%; padding: 18px; border-radius: 18px; background: #111318; box-sizing: border-box; }}
+    .resume-preview-page {{ width: min(100%, 760px); min-height: 980px; margin: 0 auto; padding: 46px 52px 54px; box-sizing: border-box; background: #fff; color: var(--resume-text); box-shadow: 0 24px 60px rgba(0,0,0,.28); font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; }}
+    .resume-preview-title {{ margin: -46px -52px 24px; padding: 13px; text-align: center; color: #fff; background: var(--resume-primary); font-size: 20px; font-weight: 800; letter-spacing: .42em; text-indent: .42em; }}
+    .resume-preview-header {{ display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 24px 26px; border: 1px solid var(--resume-border); border-bottom: 3px solid var(--resume-accent); background: var(--resume-pale); }}
+    .resume-preview-header-dark {{ color: #fff; background: var(--resume-primary); border-color: var(--resume-primary); border-bottom-color: var(--resume-accent); }}
+    .resume-preview-header-line {{ padding-left: 0; padding-right: 0; background: #fff; border-width: 0 0 2px; }}
+    .resume-preview-name {{ margin: 0 0 7px; font-size: 31px; line-height: 1.18; font-weight: 800; letter-spacing: .04em; }}
+    .resume-preview-role {{ margin: 0 0 7px; color: var(--resume-accent); font-size: 15px; font-weight: 700; }}
+    .resume-preview-header-dark .resume-preview-role {{ color: var(--resume-soft); }}
+    .resume-preview-contact {{ margin: 0; color: var(--resume-muted); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }}
+    .resume-preview-header-dark .resume-preview-contact {{ color: #dce7ef; }}
+    .resume-preview-photo {{ width: 92px; height: 116px; object-fit: cover; border: 4px solid #fff; box-shadow: 0 3px 14px rgba(16,42,67,.16); flex: 0 0 auto; }}
+    .resume-preview-body {{ padding-top: 13px; }}
+    .resume-preview-section {{ margin: 20px 0 10px; padding: 9px 12px; color: var(--resume-primary); background: var(--resume-pale); border: 1px solid var(--resume-border); border-left: 5px solid var(--resume-accent); font-size: 17px; line-height: 1.35; }}
+    .resume-preview-paragraph, .resume-preview-bullet {{ margin: 0 0 7px; font-size: 13.5px; line-height: 1.72; white-space: normal; overflow-wrap: anywhere; }}
+    .resume-preview-bullet {{ position: relative; padding-left: 17px; }}
+    .resume-preview-bullet::before {{ content: ""; position: absolute; left: 3px; top: .72em; width: 5px; height: 5px; border-radius: 50%; background: var(--resume-accent); }}
+    @media (max-width: 640px) {{
+      .resume-preview-shell {{ padding: 8px; }}
+      .resume-preview-page {{ min-height: 0; padding: 28px 24px 38px; }}
+      .resume-preview-title {{ margin: -28px -24px 18px; }}
+      .resume-preview-header {{ padding: 18px; }}
+      .resume-preview-name {{ font-size: 25px; }}
+      .resume-preview-photo {{ width: 70px; height: 88px; }}
+    }}
+  </style>
+  <article class="resume-preview-page" aria-label="{html.escape(template['name'])}简历实时预览">
+    <div class="resume-preview-title">简历</div>
+    <header class="{header_class}">
+      <div>
+        <h2 class="resume-preview-name">{name}</h2>
+        <p class="resume-preview-role">目标岗位：{role}</p>
+        {f'<p class="resume-preview-contact">{contact}</p>' if contact else ''}
+      </div>
+      {photo_html}
+    </header>
+    <div class="resume-preview-body">{''.join(body_parts)}</div>
+  </article>
+</div>
+"""
+
+
 def _set_word_font(run, size: float = 10.5, bold: bool = False, color: str = "202938") -> None:
     run.font.name = "Microsoft YaHei"
     run._element.rPr.rFonts.set(qn("w:eastAsia"), "微软雅黑")
@@ -212,7 +354,7 @@ def _remove_word_table_borders(table) -> None:
         element.set(qn("w:val"), "nil")
 
 
-def _set_word_heading_style(paragraph) -> None:
+def _set_word_heading_style(paragraph, color: str) -> None:
     paragraph.paragraph_format.space_before = Pt(10)
     paragraph.paragraph_format.space_after = Pt(5)
     paragraph.paragraph_format.keep_with_next = True
@@ -222,7 +364,7 @@ def _set_word_heading_style(paragraph) -> None:
     left.set(qn("w:val"), "single")
     left.set(qn("w:sz"), "18")
     left.set(qn("w:space"), "8")
-    left.set(qn("w:color"), "1F4E79")
+    left.set(qn("w:color"), color)
     borders.append(left)
     properties.append(borders)
 
@@ -231,8 +373,15 @@ def create_resume_document(
     resume_data: dict,
     optimized_text: str | None = None,
     photo_bytes: bytes | None = None,
+    template_id: str = DEFAULT_TEMPLATE_ID,
 ) -> bytes:
-    """生成招聘网站风格的完整 Word 简历。"""
+    """生成所选专业模板的完整 Word 简历。"""
+    template = _template(template_id)
+    primary = template["primary"].lstrip("#")
+    accent_color = template["accent"].lstrip("#")
+    pale = template["pale"].lstrip("#")
+    text_color = template["text"].lstrip("#")
+    muted = template["muted"].lstrip("#")
     document = Document()
     section = document.sections[0]
     section.top_margin = Cm(1.35)
@@ -248,7 +397,7 @@ def create_resume_document(
     accent.autofit = False
     accent.columns[0].width = Cm(17.0)
     _remove_word_table_borders(accent)
-    _shade_word_cell(accent.cell(0, 0), "1F4E79")
+    _shade_word_cell(accent.cell(0, 0), primary)
     accent.cell(0, 0).paragraphs[0].paragraph_format.space_after = Pt(0)
     _word_text(accent.cell(0, 0).paragraphs[0], " ", 2)
 
@@ -258,21 +407,25 @@ def create_resume_document(
     header.columns[1].width = Cm(3.3)
     _remove_word_table_borders(header)
     left_cell, right_cell = header.rows[0].cells
-    _shade_word_cell(left_cell, "F4F7FB")
-    _shade_word_cell(right_cell, "F4F7FB")
+    header_fill = primary if template["header_mode"] == "dark" else pale
+    _shade_word_cell(left_cell, header_fill)
+    _shade_word_cell(right_cell, header_fill)
     left_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
     right_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
 
     name_paragraph = left_cell.paragraphs[0]
-    _word_text(name_paragraph, _plain(resume_data.get("name")) or "个人简历", 22, True, "172B4D")
+    header_text = "FFFFFF" if template["header_mode"] == "dark" else primary
+    header_muted = "DCE7EF" if template["header_mode"] == "dark" else muted
+    _word_text(name_paragraph, _plain(resume_data.get("name")) or "个人简历", 22, True, header_text)
     name_paragraph.paragraph_format.space_after = Pt(4)
     role_paragraph = left_cell.add_paragraph()
-    _word_text(role_paragraph, f"目标岗位：{_plain(resume_data.get('target_role'))}", 11, True, "1F4E79")
+    role_color = "E8EEF4" if template["header_mode"] == "dark" else accent_color
+    _word_text(role_paragraph, f"目标岗位：{_plain(resume_data.get('target_role'))}", 11, True, role_color)
     role_paragraph.paragraph_format.space_after = Pt(3)
     contact = _contact_line(resume_data)
     if contact:
         contact_paragraph = left_cell.add_paragraph()
-        _word_text(contact_paragraph, contact, 9.5, False, "46566B")
+        _word_text(contact_paragraph, contact, 9.5, False, header_muted)
 
     if photo_bytes:
         photo_paragraph = right_cell.paragraphs[0]
@@ -283,23 +436,23 @@ def create_resume_document(
     for block_type, text in _content_blocks(resume_data, optimized_text):
         if block_type == "heading":
             paragraph = document.add_paragraph()
-            _set_word_heading_style(paragraph)
-            _word_text(paragraph, text, 13, True, "1F4E79")
+            _set_word_heading_style(paragraph, accent_color)
+            _word_text(paragraph, text, 13, True, primary)
         elif block_type == "bullet":
             paragraph = document.add_paragraph()
             paragraph.paragraph_format.left_indent = Cm(0.35)
             paragraph.paragraph_format.first_line_indent = Cm(-0.25)
             paragraph.paragraph_format.space_after = Pt(2)
-            _word_text(paragraph, f"· {text}")
+            _word_text(paragraph, f"· {text}", color=text_color)
         else:
             paragraph = document.add_paragraph()
             paragraph.paragraph_format.line_spacing = 1.15
             paragraph.paragraph_format.space_after = Pt(3)
-            _word_text(paragraph, text)
+            _word_text(paragraph, text, color=text_color)
 
     footer = section.footer.paragraphs[0]
     footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    _word_text(footer, "个人简历", 8, False, "64748B")
+    _word_text(footer, f"个人简历 ｜ {template['name']}", 8, False, muted)
     output = BytesIO()
     document.save(output)
     return output.getvalue()
@@ -369,9 +522,10 @@ def _pdf_photo(photo_bytes: bytes) -> PdfImage:
 class SectionIcon(Flowable):
     """用矢量线条绘制章节图标，避免依赖可能缺字的图标字体。"""
 
-    def __init__(self, kind: str):
+    def __init__(self, kind: str, template: dict):
         super().__init__()
         self.kind = kind
+        self.template = template
         self.width = 11 * mm
         self.height = 11 * mm
 
@@ -383,12 +537,12 @@ class SectionIcon(Flowable):
         center = self.width / 2
         radius = 4.6 * mm
         canvas.saveState()
-        canvas.setFillColor(PDF_LIGHT_BLUE)
-        canvas.setStrokeColor(colors.HexColor("#9FC3E1"))
+        canvas.setFillColor(colors.HexColor(self.template["soft"]))
+        canvas.setStrokeColor(colors.HexColor(self.template["border"]))
         canvas.setLineWidth(0.7)
         canvas.circle(center, self.height / 2, radius, fill=1, stroke=1)
-        canvas.setStrokeColor(PDF_BLUE)
-        canvas.setFillColor(PDF_BLUE)
+        canvas.setStrokeColor(colors.HexColor(self.template["accent"]))
+        canvas.setFillColor(colors.HexColor(self.template["accent"]))
         canvas.setLineWidth(1.05)
 
         if self.kind == "education":
@@ -423,16 +577,16 @@ class SectionIcon(Flowable):
         canvas.restoreState()
 
 
-def _pdf_section_heading(title: str, kind: str, style, width: float) -> Table:
+def _pdf_section_heading(title: str, kind: str, style, width: float, template: dict) -> Table:
     heading = Table(
-        [[SectionIcon(kind), Paragraph(html.escape(title), style)]],
+        [[SectionIcon(kind, template), Paragraph(html.escape(title), style)]],
         colWidths=[12 * mm, width - 12 * mm],
     )
     heading.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("BACKGROUND", (0, 0), (-1, -1), PDF_PALE_BLUE),
-        ("BOX", (0, 0), (-1, -1), 0.55, PDF_BORDER_BLUE),
-        ("LINEBELOW", (0, 0), (-1, -1), 0.8, colors.HexColor("#A9C8E2")),
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(template["pale"])),
+        ("BOX", (0, 0), (-1, -1), 0.55, colors.HexColor(template["border"])),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.8, colors.HexColor(template["border"])),
         ("LEFTPADDING", (0, 0), (0, 0), 5),
         ("RIGHTPADDING", (0, 0), (0, 0), 1),
         ("LEFTPADDING", (1, 0), (1, 0), 3),
@@ -443,24 +597,24 @@ def _pdf_section_heading(title: str, kind: str, style, width: float) -> Table:
     return heading
 
 
-def _draw_pdf_page(canvas, doc, pdf_font: str) -> None:
-    """绘制蓝白商务背景、克制的几何图案和页码。"""
+def _draw_pdf_page(canvas, doc, pdf_font: str, template: dict) -> None:
+    """绘制所选模板的页面背景和页码。"""
     canvas.saveState()
     page_width, page_height = A4
     canvas.setFillColor(colors.white)
     canvas.rect(0, 0, page_width, page_height, fill=1, stroke=0)
-    canvas.setFillColor(PDF_NAVY)
+    canvas.setFillColor(colors.HexColor(template["primary"]))
     canvas.rect(0, page_height - 4 * mm, page_width, 4 * mm, fill=1, stroke=0)
-    canvas.setFillColor(colors.HexColor("#EDF5FB"))
+    canvas.setFillColor(colors.HexColor(template["soft"]))
     canvas.circle(page_width + 5 * mm, page_height - 18 * mm, 26 * mm, fill=1, stroke=0)
-    canvas.setFillColor(colors.HexColor("#F4F8FC"))
+    canvas.setFillColor(colors.HexColor(template["pale"]))
     canvas.circle(-8 * mm, 17 * mm, 22 * mm, fill=1, stroke=0)
-    canvas.setStrokeColor(PDF_BORDER_BLUE)
+    canvas.setStrokeColor(colors.HexColor(template["border"]))
     canvas.setLineWidth(0.6)
     canvas.line(16 * mm, 12 * mm, page_width - 16 * mm, 12 * mm)
     canvas.setFont(pdf_font, 8)
-    canvas.setFillColor(PDF_MUTED)
-    canvas.drawString(17 * mm, 7.5 * mm, "个人简历")
+    canvas.setFillColor(colors.HexColor(template["muted"]))
+    canvas.drawString(17 * mm, 7.5 * mm, f"个人简历 ｜ {template['name']}")
     canvas.drawRightString(page_width - 17 * mm, 7.5 * mm, f"第 {doc.page} 页")
     canvas.restoreState()
 
@@ -469,8 +623,16 @@ def create_resume_pdf(
     resume_data: dict,
     optimized_text: str | None = None,
     photo_bytes: bytes | None = None,
+    template_id: str = DEFAULT_TEMPLATE_ID,
 ) -> bytes:
-    """生成蓝白商务风格、适合招聘阅读和打印的中文 PDF 简历。"""
+    """生成所选专业模板、适合招聘阅读和打印的中文 PDF 简历。"""
+    template = _template(template_id)
+    pdf_primary = colors.HexColor(template["primary"])
+    pdf_accent = colors.HexColor(template["accent"])
+    pdf_pale = colors.HexColor(template["pale"])
+    pdf_border = colors.HexColor(template["border"])
+    pdf_text = colors.HexColor(template["text"])
+    pdf_muted = colors.HexColor(template["muted"])
     pdf_font, pdf_bold_font = _register_pdf_fonts()
     output = BytesIO()
     document = SimpleDocTemplate(
@@ -497,37 +659,39 @@ def create_resume_pdf(
     name_style = ParagraphStyle(
         "ResumeName", parent=styles["Title"], fontName=pdf_bold_font,
         fontSize=23, leading=28, alignment=TA_LEFT,
-        textColor=PDF_NAVY, spaceAfter=4,
+        textColor=colors.white if template["header_mode"] == "dark" else pdf_primary,
+        spaceAfter=4,
     )
     role_style = ParagraphStyle(
         "ResumeRole", parent=styles["Normal"], fontName=pdf_bold_font,
-        fontSize=10.8, leading=16, textColor=PDF_BLUE, spaceAfter=2,
+        fontSize=10.8, leading=16, textColor=pdf_accent, spaceAfter=2,
     )
     contact_style = ParagraphStyle(
         "ResumeContact", parent=styles["Normal"], fontName=pdf_font,
-        fontSize=9.4, leading=14.5, textColor=PDF_MUTED,
+        fontSize=9.4, leading=14.5,
+        textColor=colors.HexColor("#DCE7EF") if template["header_mode"] == "dark" else pdf_muted,
     )
     heading_style = ParagraphStyle(
         "ResumeHeading", parent=styles["Heading2"], fontName=pdf_bold_font,
-        fontSize=12.5, leading=17, textColor=PDF_NAVY,
+        fontSize=12.5, leading=17, textColor=pdf_primary,
         spaceBefore=0, spaceAfter=0,
     )
     body_style = ParagraphStyle(
         "ResumeBody", parent=styles["BodyText"], fontName=pdf_font,
         fontSize=10.4, leading=16.2, alignment=TA_LEFT,
-        textColor=PDF_TEXT, spaceAfter=4.2, wordWrap="CJK",
+        textColor=pdf_text, spaceAfter=4.2, wordWrap="CJK",
         splitLongWords=False, allowWidows=0, allowOrphans=0,
     )
     entry_style = ParagraphStyle(
         "ResumeEntry", parent=body_style, fontName=pdf_bold_font,
-        textColor=colors.HexColor("#243B53"),
+        textColor=pdf_primary,
         spaceBefore=0.8, spaceAfter=3.6,
     )
     bullet_style = ParagraphStyle(
         "ResumeBullet", parent=body_style,
         leftIndent=5 * mm, firstLineIndent=0,
         bulletIndent=1.2 * mm, bulletFontName=pdf_bold_font,
-        bulletFontSize=6.5, bulletColor=PDF_BLUE,
+        bulletFontSize=6.5, bulletColor=pdf_accent,
         spaceAfter=3.6,
     )
 
@@ -544,7 +708,7 @@ def create_resume_pdf(
         colWidths=[document.width],
     )
     title_bar.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), PDF_NAVY),
+        ("BACKGROUND", (0, 0), (-1, -1), pdf_primary),
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("TOPPADDING", (0, 0), (-1, -1), 4.2 * mm),
@@ -563,18 +727,18 @@ def create_resume_pdf(
         header = Table([[header_items]], colWidths=[document.width])
     header_commands = [
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("BACKGROUND", (0, 0), (-1, -1), PDF_PALE_BLUE),
+        ("BACKGROUND", (0, 0), (-1, -1), pdf_primary if template["header_mode"] == "dark" else pdf_pale),
         ("LEFTPADDING", (0, 0), (-1, -1), 7 * mm),
         ("RIGHTPADDING", (0, 0), (-1, -1), 7 * mm),
         ("TOPPADDING", (0, 0), (-1, -1), 5.5 * mm),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 5.5 * mm),
-        ("BOX", (0, 0), (-1, -1), 0.65, PDF_BORDER_BLUE),
-        ("LINEBELOW", (0, 0), (-1, -1), 1.2, PDF_BLUE),
+        ("BOX", (0, 0), (-1, -1), 0.65, pdf_border),
+        ("LINEBELOW", (0, 0), (-1, -1), 1.2, pdf_accent),
     ]
     if photo_bytes:
         header_commands.extend([
             ("ALIGN", (1, 0), (1, 0), "RIGHT"),
-            ("LINEBEFORE", (1, 0), (1, 0), 0.5, PDF_BORDER_BLUE),
+            ("LINEBEFORE", (1, 0), (1, 0), 0.5, pdf_border),
             ("LEFTPADDING", (1, 0), (1, 0), 2.5 * mm),
             ("RIGHTPADDING", (1, 0), (1, 0), 2.5 * mm),
             ("TOPPADDING", (1, 0), (1, 0), 2.5 * mm),
@@ -603,6 +767,7 @@ def create_resume_pdf(
                 section_kinds.get(text, "summary"),
                 heading_style,
                 document.width,
+                template,
             )
             current_section_flowables = []
         elif block_type == "bullet":
@@ -643,7 +808,7 @@ def create_resume_pdf(
 
     document.build(
         story,
-        onFirstPage=lambda canvas, doc: _draw_pdf_page(canvas, doc, pdf_font),
-        onLaterPages=lambda canvas, doc: _draw_pdf_page(canvas, doc, pdf_font),
+        onFirstPage=lambda canvas, doc: _draw_pdf_page(canvas, doc, pdf_font, template),
+        onLaterPages=lambda canvas, doc: _draw_pdf_page(canvas, doc, pdf_font, template),
     )
     return output.getvalue()
