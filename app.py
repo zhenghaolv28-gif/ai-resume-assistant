@@ -1813,14 +1813,13 @@ if resume_data:
     else:
         st.info("还没有 AI 优化结果，将导出你填写的原始内容。")
 
-    st.markdown(
+    st.html(
         create_resume_preview_html(
             resume_data,
             optimized_text=final_resume_text or None,
             photo_bytes=resume_data.get("photo_bytes"),
             template_id=selected_template_id,
-        ),
-        unsafe_allow_html=True,
+        )
     )
     st.caption("预览会随模板和内容即时更新。最终分页以导出的 Word 或 PDF 为准。")
 
