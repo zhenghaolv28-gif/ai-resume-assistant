@@ -13,15 +13,27 @@ from dotenv import load_dotenv
 
 from resume_import import extract_resume_text_with_details, parse_resume_text
 from resume_review import build_reviewed_resume_text, text_diff_fragments
-from resume_template import (
-    DEFAULT_TEMPLATE_ID,
-    clean_resume_text,
-    create_resume_document,
-    create_resume_pdf,
-    create_resume_preview_html,
-    resume_template_description,
-    resume_template_options,
-)
+
+
+def _load_resume_template_from_file():
+    """从确切文件路径加载模板模块，避免 Streamlit 复用旧模块缓存。"""
+    template_path = Path(__file__).with_name("resume_template.py")
+    spec = spec_from_file_location("resume_assistant_resume_template", template_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法加载简历模板文件：{template_path}")
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_resume_template = _load_resume_template_from_file()
+DEFAULT_TEMPLATE_ID = _resume_template.DEFAULT_TEMPLATE_ID
+clean_resume_text = _resume_template.clean_resume_text
+create_resume_document = _resume_template.create_resume_document
+create_resume_pdf = _resume_template.create_resume_pdf
+create_resume_preview_html = _resume_template.create_resume_preview_html
+resume_template_description = _resume_template.resume_template_description
+resume_template_options = _resume_template.resume_template_options
 
 
 def _load_ai_service_from_file():
