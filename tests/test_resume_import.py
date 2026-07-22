@@ -4,6 +4,7 @@ from importlib.util import module_from_spec, spec_from_file_location
 from io import BytesIO
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from docx import Document
 from reportlab.pdfgen.canvas import Canvas
@@ -17,6 +18,66 @@ SPEC.loader.exec_module(RESUME_IMPORT)
 
 
 class ResumeParserTests(unittest.TestCase):
+    def test_text_pdf_does_not_start_ocr(self) -> None:
+        native_text = (
+            "张三\n求职意向：产品经理\n工作经历\n"
+            "2022-至今 某科技公司 产品经理\n教育经历\n某大学 本科"
+        )
+        with patch.object(RESUME_IMPORT, "_read_pdf_native", return_value=native_text), patch.object(
+            RESUME_IMPORT,
+            "_read_pdf_ocr",
+            side_effect=AssertionError("普通文字 PDF 不应调用 OCR"),
+        ):
+            result = RESUME_IMPORT.extract_resume_text_with_details(b"pdf", "resume.pdf")
+
+        self.assertFalse(result.ocr_used)
+        self.assertEqual(result.method, "PDF 可复制文字")
+        self.assertEqual(result.text, native_text)
+
+    def test_scanned_pdf_automatically_falls_back_to_ocr(self) -> None:
+        ocr_text = (
+            "李雷\n目标岗位：数据分析师\n工作经历\n"
+            "2023-至今 某零售公司 数据分析师\n专业技能\nPython、SQL"
+        )
+        with patch.object(RESUME_IMPORT, "_read_pdf_native", return_value=""), patch.object(
+            RESUME_IMPORT,
+            "_read_pdf_ocr",
+            return_value=(ocr_text, "chi_sim+eng"),
+        ):
+            result = RESUME_IMPORT.extract_resume_text_with_details(b"scan", "scan.pdf")
+
+        self.assertTrue(result.ocr_used)
+        self.assertEqual(result.method, "扫描 PDF OCR")
+        self.assertEqual(result.ocr_language, "chi_sim+eng")
+        self.assertIn("数据分析师", result.text)
+
+    def test_image_resume_uses_ocr_and_existing_parser(self) -> None:
+        ocr_text = (
+            "王芳\n所在城市：深圳\n求职意向：用户运营\n"
+            "工作经历\n2024-至今 某互联网公司 用户运营"
+        )
+        with patch.object(
+            RESUME_IMPORT,
+            "_read_image_ocr",
+            return_value=(ocr_text, "chi_sim+eng"),
+        ):
+            result = RESUME_IMPORT.extract_resume_text_with_details(b"image", "resume.PNG")
+
+        parsed = RESUME_IMPORT.parse_resume_text(result.text)
+        self.assertTrue(result.ocr_used)
+        self.assertEqual(result.method, "图片 OCR")
+        self.assertEqual(parsed["city"], "深圳")
+        self.assertIn("某互联网公司", parsed["work_experience"])
+
+    def test_ocr_result_with_too_little_text_has_clear_error(self) -> None:
+        with patch.object(
+            RESUME_IMPORT,
+            "_read_image_ocr",
+            return_value=("空白", "chi_sim+eng"),
+        ):
+            with self.assertRaisesRegex(ValueError, "OCR 没有识别到足够文字"):
+                RESUME_IMPORT.extract_resume_text_with_details(b"image", "blank.jpg")
+
     def test_plain_contact_header_is_extracted_and_not_duplicated(self) -> None:
         parsed = RESUME_IMPORT.parse_resume_text(
             """张三

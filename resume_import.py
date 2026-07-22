@@ -6,15 +6,33 @@ DeepSeek。识别结果一定要经过用户确认后，才会保存到主简历
 
 from __future__ import annotations
 
+from functools import lru_cache
 from io import BytesIO
 import re
 import unicodedata
-from typing import Any
+from typing import Any, NamedTuple
 from zipfile import BadZipFile, ZipFile
 from xml.etree import ElementTree
 
 from docx import Document
 from docx.table import Table
+
+
+IMAGE_RESUME_SUFFIXES = frozenset({"png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"})
+OCR_MAX_PDF_PAGES = 8
+OCR_MAX_IMAGE_FRAMES = 8
+OCR_MAX_PIXELS_PER_PAGE = 40_000_000
+OCR_MIN_NATIVE_CHARACTERS = 30
+OCR_RENDER_SCALE = 2.4
+
+
+class ResumeTextExtraction(NamedTuple):
+    """一次简历取字的结果，供界面说明是否启用了 OCR。"""
+
+    text: str
+    method: str
+    ocr_used: bool = False
+    ocr_language: str = ""
 
 
 _SECTION_ALIASES: dict[str, tuple[str, ...]] = {
@@ -516,7 +534,7 @@ def _pdf_layout_column_candidate(layout_text: str) -> str:
     return _normalize_text("\n".join(prefix + columns[0] + columns[1]))
 
 
-def _read_pdf(file_bytes: bytes) -> str:
+def _read_pdf_native(file_bytes: bytes) -> str:
     try:
         from pypdf import PdfReader
     except ImportError as exc:  # pragma: no cover - deployment dependency guard
@@ -551,6 +569,193 @@ def _read_pdf(file_bytes: bytes) -> str:
         if column_text and column_text not in candidates:
             candidates.append(column_text)
     return max(candidates, key=_resume_text_structure_score)
+
+
+def _meaningful_character_count(text: str) -> int:
+    """统计中英文和数字，避免把 PDF 控制字符误当成有效正文。"""
+    return len(re.findall(r"[\u3400-\u9fffA-Za-z0-9]", text))
+
+
+def _native_pdf_text_is_sufficient(text: str) -> bool:
+    """普通 PDF 有足够正文时不启动较慢的 OCR。"""
+    return _meaningful_character_count(text) >= OCR_MIN_NATIVE_CHARACTERS
+
+
+@lru_cache(maxsize=1)
+def _tesseract_language() -> str:
+    """优先使用简体中文和英文；给本地缺少语言包时提供明确提示。"""
+    try:
+        import pytesseract
+    except ImportError as exc:  # pragma: no cover - deployment dependency guard
+        raise ValueError("OCR 组件未安装，请安装 requirements.txt 后重新启动应用。") from exc
+
+    try:
+        available_languages = set(pytesseract.get_languages(config=""))
+    except pytesseract.TesseractNotFoundError as exc:
+        raise ValueError(
+            "没有找到 Tesseract OCR。Windows 本地运行时请先安装 Tesseract，"
+            "云端部署会通过 packages.txt 自动安装。"
+        ) from exc
+    except pytesseract.TesseractError as exc:
+        raise ValueError("OCR 引擎启动失败，请检查 Tesseract 安装后重试。") from exc
+
+    preferred = [language for language in ("chi_sim", "eng") if language in available_languages]
+    if not preferred:
+        raise ValueError(
+            "OCR 缺少中文或英文语言包，请安装 tesseract-ocr-chi-sim 和 "
+            "tesseract-ocr-eng。"
+        )
+    return "+".join(preferred)
+
+
+def _prepare_ocr_image(image):
+    """修正旋转、背景和对比度，并把小图放大到适合 OCR 的尺寸。"""
+    try:
+        from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+    except ImportError as exc:  # pragma: no cover - deployment dependency guard
+        raise ValueError("图片识别需要 Pillow 依赖，请先安装项目依赖。") from exc
+
+    image = ImageOps.exif_transpose(image)
+    if image.width * image.height > OCR_MAX_PIXELS_PER_PAGE:
+        raise ValueError("图片尺寸过大，请压缩到 4000 万像素以内再上传。")
+
+    if image.mode in {"RGBA", "LA"} or "transparency" in image.info:
+        rgba_image = image.convert("RGBA")
+        white_background = Image.new("RGBA", rgba_image.size, "white")
+        image = Image.alpha_composite(white_background, rgba_image).convert("RGB")
+    else:
+        image = image.convert("RGB")
+
+    longest_side = max(image.size)
+    if longest_side < 1800:
+        scale = min(2.5, 1800 / max(longest_side, 1))
+        image = image.resize(
+            (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+    elif longest_side > 3200:
+        scale = 3200 / longest_side
+        image = image.resize(
+            (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+
+    grayscale = ImageOps.grayscale(image)
+    grayscale = ImageOps.autocontrast(grayscale, cutoff=1)
+    grayscale = ImageEnhance.Contrast(grayscale).enhance(1.15)
+    return grayscale.filter(ImageFilter.SHARPEN)
+
+
+def _best_ocr_text(raw_text: str) -> str:
+    """保留 OCR 原顺序，同时尝试修复用大空格分开的双栏简历。"""
+    normalized = _normalize_text(raw_text)
+    candidates = [normalized]
+    column_text = _pdf_layout_column_candidate(raw_text)
+    if column_text and column_text not in candidates:
+        candidates.append(column_text)
+    return max(candidates, key=_resume_text_structure_score)
+
+
+def _ocr_image(image) -> tuple[str, str]:
+    try:
+        import pytesseract
+    except ImportError as exc:  # pragma: no cover - deployment dependency guard
+        raise ValueError("OCR 组件未安装，请安装 requirements.txt 后重新启动应用。") from exc
+
+    language = _tesseract_language()
+    prepared = _prepare_ocr_image(image)
+    config = "--oem 3 --psm 3 -c preserve_interword_spaces=1"
+    try:
+        raw_text = pytesseract.image_to_string(
+            prepared,
+            lang=language,
+            config=config,
+            timeout=45,
+        )
+        if _meaningful_character_count(raw_text) < 10:
+            raw_text = pytesseract.image_to_string(
+                prepared,
+                lang=language,
+                config="--oem 3 --psm 6 -c preserve_interword_spaces=1",
+                timeout=45,
+            )
+    except RuntimeError as exc:
+        raise ValueError("OCR 识别超时，请压缩图片或减少 PDF 页数后重试。") from exc
+    except pytesseract.TesseractNotFoundError as exc:
+        _tesseract_language.cache_clear()
+        raise ValueError("没有找到 Tesseract OCR，请先安装 OCR 引擎后重试。") from exc
+    except pytesseract.TesseractError as exc:
+        raise ValueError("OCR 未能读取这张图片，请换成更清晰的原图后重试。") from exc
+    return _best_ocr_text(raw_text), language
+
+
+def _read_image_ocr(file_bytes: bytes) -> tuple[str, str]:
+    try:
+        from PIL import Image, ImageSequence, UnidentifiedImageError
+    except ImportError as exc:  # pragma: no cover - deployment dependency guard
+        raise ValueError("图片识别需要 Pillow 依赖，请先安装项目依赖。") from exc
+
+    try:
+        with Image.open(BytesIO(file_bytes)) as source:
+            frames = []
+            for frame_index, frame in enumerate(ImageSequence.Iterator(source)):
+                if frame_index >= OCR_MAX_IMAGE_FRAMES:
+                    raise ValueError(
+                        f"图片文件超过 {OCR_MAX_IMAGE_FRAMES} 页，请拆分后重新上传。"
+                    )
+                frames.append(frame.copy())
+    except ValueError:
+        raise
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ValueError("这个图片文件无法读取，请另存为 JPG 或 PNG 后再上传。") from exc
+
+    page_texts: list[str] = []
+    language = ""
+    for frame in frames:
+        page_text, language = _ocr_image(frame)
+        if page_text:
+            page_texts.append(page_text)
+    return _normalize_text("\n\n".join(page_texts)), language
+
+
+def _read_pdf_ocr(file_bytes: bytes) -> tuple[str, str]:
+    try:
+        import pypdfium2 as pdfium
+    except ImportError as exc:  # pragma: no cover - deployment dependency guard
+        raise ValueError("扫描 PDF 识别需要 pypdfium2，请先安装项目依赖。") from exc
+
+    try:
+        document = pdfium.PdfDocument(file_bytes)
+    except Exception as exc:
+        raise ValueError("这个 PDF 无法转换为图片，请尝试另存为新的 PDF 后再上传。") from exc
+
+    try:
+        page_count = len(document)
+        if page_count == 0:
+            raise ValueError("这个 PDF 没有可识别的页面。")
+        if page_count > OCR_MAX_PDF_PAGES:
+            raise ValueError(
+                f"扫描 PDF 最多支持 {OCR_MAX_PDF_PAGES} 页，当前有 {page_count} 页。"
+                "请删除无关页面或拆分文件后重试。"
+            )
+
+        page_texts: list[str] = []
+        language = ""
+        for page_index in range(page_count):
+            page = document[page_index]
+            bitmap = None
+            try:
+                bitmap = page.render(scale=OCR_RENDER_SCALE)
+                page_text, language = _ocr_image(bitmap.to_pil())
+                if page_text:
+                    page_texts.append(page_text)
+            finally:
+                if bitmap is not None:
+                    bitmap.close()
+                page.close()
+        return _normalize_text("\n\n".join(page_texts)), language
+    finally:
+        document.close()
 
 
 _WORD_NAMESPACE = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -761,27 +966,75 @@ def _read_docx(file_bytes: bytes) -> str:
     return _normalize_text("\n".join(parts))
 
 
-def extract_resume_text(file_bytes: bytes, filename: str) -> str:
-    """从 .pdf 或 .docx 读取文本。"""
+def extract_resume_text_with_details(
+    file_bytes: bytes,
+    filename: str,
+) -> ResumeTextExtraction:
+    """从 PDF、Word 或图片取字；扫描内容会自动回退到本地 OCR。"""
     if not file_bytes:
         raise ValueError("上传的文件为空，请重新选择。")
     suffix = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
     if suffix == "pdf":
-        text = _read_pdf(file_bytes)
+        native_text = _read_pdf_native(file_bytes)
+        if _native_pdf_text_is_sufficient(native_text):
+            result = ResumeTextExtraction(
+                text=native_text,
+                method="PDF 可复制文字",
+            )
+        else:
+            try:
+                ocr_text, ocr_language = _read_pdf_ocr(file_bytes)
+            except ValueError:
+                if _meaningful_character_count(native_text) >= 10:
+                    result = ResumeTextExtraction(
+                        text=native_text,
+                        method="PDF 可复制文字（内容较少）",
+                    )
+                else:
+                    raise
+            else:
+                result = ResumeTextExtraction(
+                    text=ocr_text,
+                    method="扫描 PDF OCR",
+                    ocr_used=True,
+                    ocr_language=ocr_language,
+                )
     elif suffix == "docx":
-        text = _read_docx(file_bytes)
+        result = ResumeTextExtraction(
+            text=_read_docx(file_bytes),
+            method="Word 可编辑文字",
+        )
     elif suffix == "doc":
         raise ValueError("暂不支持旧版 .doc，请在 Word 中另存为 .docx 后再上传。")
+    elif suffix in IMAGE_RESUME_SUFFIXES:
+        ocr_text, ocr_language = _read_image_ocr(file_bytes)
+        result = ResumeTextExtraction(
+            text=ocr_text,
+            method="图片 OCR",
+            ocr_used=True,
+            ocr_language=ocr_language,
+        )
     else:
-        raise ValueError("只支持 PDF 或 Word（.docx）文件。")
-    if len(text.replace("\n", "").strip()) < 10:
+        raise ValueError(
+            "只支持 PDF、Word（.docx）或 JPG、PNG、WEBP、BMP、TIFF 图片。"
+        )
+    if _meaningful_character_count(result.text) < 10:
         if suffix == "docx":
             raise ValueError(
                 "这个 Word 中没有读取到足够的可编辑文字。文件内容可能是图片，"
-                "请在 Word 中确认文字可以选中复制，再另存为新的 .docx 后上传。"
+                "请先把页面导出为图片或 PDF，再使用 OCR 导入。"
             )
-        raise ValueError("没有读取到足够的文字。若这是扫描版 PDF，请先用 OCR 转成可复制文字的 PDF。")
-    return text
+        if result.ocr_used:
+            raise ValueError(
+                "OCR 没有识别到足够文字。请上传更清晰、方向正确且没有严重反光的原图。"
+            )
+        raise ValueError("没有读取到足够的文字，请检查文件内容后重新上传。")
+    return result
+
+
+def extract_resume_text(file_bytes: bytes, filename: str) -> str:
+    """兼容原调用方式，只返回取出的简历文字。"""
+    return extract_resume_text_with_details(file_bytes, filename).text
 
 
 def _compact_key(value: str) -> str:

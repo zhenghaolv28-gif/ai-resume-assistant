@@ -11,7 +11,7 @@ from uuid import uuid4
 import streamlit as st
 from dotenv import load_dotenv
 
-from resume_import import extract_resume_text, parse_resume_text
+from resume_import import extract_resume_text_with_details, parse_resume_text
 from resume_review import build_reviewed_resume_text, text_diff_fragments
 from resume_template import clean_resume_text, create_resume_document, create_resume_pdf
 
@@ -1004,11 +1004,15 @@ def _recognize_imported_file(
     api_key: str,
 ) -> dict:
     """读取上传文件；按用户选择执行本地或 AI 章节归类。"""
-    imported_text = extract_resume_text(
+    extraction = extract_resume_text_with_details(
         imported_file.getvalue(),
         imported_file.name,
     )
+    imported_text = extraction.text
     imported_draft = parse_resume_text(imported_text)
+    imported_draft["extraction_method"] = extraction.method
+    imported_draft["ocr_used"] = extraction.ocr_used
+    imported_draft["ocr_language"] = extraction.ocr_language
     if not use_ai:
         return imported_draft
 
@@ -1164,15 +1168,21 @@ import_notice = st.session_state.pop("resume_import_notice", None)
 if import_notice:
     st.success(import_notice)
 
-with st.expander("导入已有 PDF / Word 简历", expanded=False):
-    st.write("先读取文字并分段，再由你逐项确认；确认前不会覆盖下面已经填写的内容。")
+with st.expander("导入已有 PDF / Word / 图片简历", expanded=False):
+    st.write("先读取文字并分段，再由你逐项确认；扫描件会自动 OCR，确认前不会覆盖已填写内容。")
     imported_file = st.file_uploader(
         "选择已有简历",
-        type=("pdf", "docx"),
+        type=("pdf", "docx", "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"),
         key="resume_import_file",
-        help="支持文字版 PDF 和 Word（.docx），最大 10MB。扫描图片版 PDF 暂时无法直接识别。",
+        help=(
+            "支持 PDF、Word（.docx）以及 JPG、PNG、WEBP、BMP、TIFF 图片，最大 10MB。"
+            "扫描版 PDF 和图片会在服务器内自动进行 OCR。"
+        ),
     )
-    st.caption("本地识别适合先快速查看；如果板块错位，请使用 AI 精准识别。")
+    st.caption(
+        "普通 PDF 会直接读取文字；扫描版 PDF 和图片会自动 OCR。"
+        "OCR 只负责取字，如果板块错位可再使用 AI 精准归类。"
+    )
     ai_import_consent = st.checkbox(
         "我同意将隐藏联系方式后的简历经历发送给 DeepSeek 做章节归类",
         key="resume_import_ai_consent",
@@ -1190,7 +1200,7 @@ with st.expander("导入已有 PDF / Word 简历", expanded=False):
 
     if start_local_import or start_ai_import:
         if imported_file is None:
-            st.warning("请先选择一个 PDF 或 Word 文件。")
+            st.warning("请先选择一个 PDF、Word 或图片文件。")
         elif imported_file.size > RESUME_IMPORT_MAX_BYTES:
             st.error("文件超过 10MB，请压缩后重新上传。")
         elif start_ai_import and not ai_import_consent:
@@ -1202,9 +1212,9 @@ with st.expander("导入已有 PDF / Word 简历", expanded=False):
             else:
                 try:
                     spinner_text = (
-                        "正在本地读取并使用 AI 归类章节……"
+                        "正在读取文字、必要时执行 OCR，并使用 AI 归类章节……"
                         if start_ai_import
-                        else "正在本地读取和整理简历……"
+                        else "正在读取文字、必要时执行 OCR，并整理简历……"
                     )
                     with st.spinner(spinner_text):
                         imported_draft = _recognize_imported_file(
@@ -1242,6 +1252,13 @@ if imported_draft:
         "请检查并修改，确认后才会保存为主简历。"
     )
     parse_warnings = imported_draft.get("parse_warnings", [])
+    if imported_draft.get("ocr_used"):
+        ocr_language = imported_draft.get("ocr_language", "")
+        language_note = "（中英文）" if "chi_sim" in ocr_language else ""
+        st.success(
+            f"已自动使用{imported_draft.get('extraction_method', 'OCR')}{language_note}取字。"
+            "扫描件可能出现相似字、空格或日期误差，请重点核对姓名、联系方式和时间。"
+        )
     if imported_draft.get("ai_assisted"):
         st.success("已完成 AI 辅助归类。联系方式仍来自本地识别，请重点核对姓名、手机和邮箱。")
     elif parse_warnings:
@@ -1277,7 +1294,10 @@ if imported_draft:
         )
 
     with st.expander("查看读取到的完整原文（用于核对漏识别内容）"):
-        st.caption("这里展示程序实际读取到的文本。若原文已经错行或缺字，通常是 PDF 多栏、表格或扫描图片造成的。")
+        st.caption(
+            f"取字方式：{imported_draft.get('extraction_method', '自动判断')}。"
+            "这里展示程序实际读取到的文本；如果错行或缺字，请上传更清晰、方向正确的原文件。"
+        )
         st.text_area(
             "完整原文",
             value=imported_draft.get("raw_text", ""),
