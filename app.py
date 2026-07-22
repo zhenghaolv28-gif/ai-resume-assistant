@@ -11,6 +11,13 @@ from uuid import uuid4
 import streamlit as st
 from dotenv import load_dotenv
 
+from job_version_operations import (
+    duplicate_job_version,
+    job_version_name_exists,
+    remove_job_version,
+    rename_job_version,
+    unique_job_version_name,
+)
 from resume_import import extract_resume_text_with_details, parse_resume_text
 from resume_review import build_reviewed_resume_text, text_diff_fragments
 
@@ -266,7 +273,7 @@ def _activate_master_resume() -> None:
     st.rerun()
 
 
-def _activate_job_version(version_id: str) -> None:
+def _activate_job_version(version_id: str, notice: str | None = None) -> None:
     """切换到指定岗位版本，并恢复该版本自己的结果。"""
     version = st.session_state.get("job_versions", {}).get(version_id)
     if not version:
@@ -279,7 +286,7 @@ def _activate_job_version(version_id: str) -> None:
     st.session_state["resume_data"] = _copy_resume_data(version.get("resume_data"))
     _load_resume_into_form(st.session_state["resume_data"])
     _restore_version_results(version)
-    st.session_state["resume_workspace_notice"] = (
+    st.session_state["resume_workspace_notice"] = notice or (
         f"已切换到岗位版本“{version.get('name', '未命名版本')}”。"
     )
     st.rerun()
@@ -306,6 +313,105 @@ def _create_job_version(version_name: str, target_role: str, job_description: st
         "job_match_result": None,
     }
     _activate_job_version(version_id)
+
+
+def _job_version_name_exists(version_name: str, excluding_id: str | None = None) -> bool:
+    """判断岗位版本名称是否与其他版本重复。"""
+    return job_version_name_exists(
+        st.session_state.get("job_versions", {}),
+        version_name,
+        excluding_id,
+    )
+
+
+def _unique_job_version_name(base_name: str) -> str:
+    """为复制版本生成不重复且易读的名称。"""
+    return unique_job_version_name(
+        st.session_state.get("job_versions", {}),
+        base_name,
+    )
+
+
+def _rename_job_version(version_id: str, new_name: str) -> None:
+    """重命名岗位版本并保留当前选择。"""
+    versions = st.session_state.get("job_versions", {})
+    if not rename_job_version(versions, version_id, new_name):
+        st.warning("找不到这个岗位版本，可能已经被删除。")
+        return
+    version = versions[version_id]
+    st.session_state["pending_job_version_selector"] = version_id
+    st.session_state["resume_workspace_notice"] = (
+        f"岗位版本已重命名为“{version['name']}”。"
+    )
+    st.rerun()
+
+
+def _duplicate_job_version(version_id: str, copy_name: str) -> None:
+    """深度复制岗位版本，并打开新生成的独立版本。"""
+    _persist_active_job_version()
+    versions = st.session_state.get("job_versions", {})
+    source_version = versions.get(version_id)
+    if source_version is None:
+        st.warning("找不到这个岗位版本，可能已经被删除。")
+        return
+
+    new_version_id = uuid4().hex[:12]
+    copied_version = duplicate_job_version(
+        versions,
+        version_id,
+        new_version_id,
+        copy_name,
+    )
+    if copied_version is None:
+        st.warning("复制岗位版本失败，请刷新页面后重试。")
+        return
+    copied_version["resume_data"] = _copy_resume_data(
+        source_version.get("resume_data")
+    )
+    _activate_job_version(
+        new_version_id,
+        notice=f"已复制并打开岗位版本“{copied_version['name']}”。",
+    )
+
+
+def _delete_job_version(version_id: str) -> None:
+    """删除岗位版本；删除当前版本时安全返回主简历。"""
+    versions = st.session_state.get("job_versions", {})
+    version = versions.get(version_id)
+    if version is None:
+        st.warning("找不到这个岗位版本，可能已经被删除。")
+        return
+
+    deleting_active_version = (
+        st.session_state.get("resume_workspace_mode") == "job"
+        and st.session_state.get("active_job_version_id") == version_id
+    )
+    if deleting_active_version:
+        _persist_active_job_version()
+
+    deleted_name = str(version.get("name", "未命名版本"))
+    remove_job_version(versions, version_id)
+    remaining_version_ids = list(versions)
+
+    if deleting_active_version:
+        master_resume = st.session_state.get("master_resume_data")
+        st.session_state["resume_workspace_mode"] = "master"
+        st.session_state["active_job_version_id"] = None
+        if master_resume:
+            st.session_state["resume_data"] = _copy_resume_data(master_resume)
+            _load_resume_into_form(st.session_state["resume_data"])
+        _clear_derived_resume_state()
+
+    if remaining_version_ids:
+        next_version_id = st.session_state.get("active_job_version_id")
+        if next_version_id not in versions:
+            next_version_id = remaining_version_ids[0]
+        st.session_state["pending_job_version_selector"] = next_version_id
+
+    st.session_state["resume_workspace_notice"] = (
+        f"已删除岗位版本“{deleted_name}”。"
+    )
+    st.rerun()
 
 
 def _resume_library_json() -> bytes:
@@ -1010,6 +1116,89 @@ def _show_new_job_version_dialog() -> None:
         _create_job_version(version_name, target_role, job_description)
 
 
+@st.dialog("重命名岗位版本")
+def _show_rename_job_version_dialog(version_id: str) -> None:
+    """修改岗位版本的显示名称。"""
+    version = st.session_state.get("job_versions", {}).get(version_id)
+    if version is None:
+        st.warning("找不到这个岗位版本，可能已经被删除。")
+        return
+
+    st.write("只修改版本名称，不会改变简历内容、模板或 AI 结果。")
+    with st.form(f"rename_job_version_form_{version_id}"):
+        new_name = st.text_input(
+            "新版本名称 *",
+            value=str(version.get("name", "")),
+            placeholder="例如：春招产品经理",
+        )
+        rename_version = st.form_submit_button(
+            "保存新名称",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if rename_version:
+        if not new_name.strip():
+            st.warning("请填写新的版本名称。")
+        elif _job_version_name_exists(new_name, excluding_id=version_id):
+            st.warning("已经存在同名岗位版本，请换一个名称。")
+        else:
+            _rename_job_version(version_id, new_name)
+
+
+@st.dialog("复制岗位版本")
+def _show_duplicate_job_version_dialog(version_id: str) -> None:
+    """复制岗位版本的已保存内容与独立结果。"""
+    version = st.session_state.get("job_versions", {}).get(version_id)
+    if version is None:
+        st.warning("找不到这个岗位版本，可能已经被删除。")
+        return
+
+    st.write("复制已保存的简历内容、模板、AI 优化稿和匹配结果。新版本可以独立修改。")
+    with st.form(f"duplicate_job_version_form_{version_id}"):
+        copy_name = st.text_input(
+            "副本名称 *",
+            value=_unique_job_version_name(str(version.get("name", ""))),
+        )
+        duplicate_version = st.form_submit_button(
+            "复制并打开",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if duplicate_version:
+        if not copy_name.strip():
+            st.warning("请填写副本名称。")
+        elif _job_version_name_exists(copy_name):
+            st.warning("已经存在同名岗位版本，请换一个名称。")
+        else:
+            _duplicate_job_version(version_id, copy_name)
+
+
+@st.dialog("删除岗位版本")
+def _show_delete_job_version_dialog(version_id: str) -> None:
+    """要求明确确认后删除岗位版本。"""
+    version = st.session_state.get("job_versions", {}).get(version_id)
+    if version is None:
+        st.warning("找不到这个岗位版本，可能已经被删除。")
+        return
+
+    version_name = str(version.get("name", "未命名版本"))
+    st.error(f"即将删除岗位版本“{version_name}”。此操作无法撤销。")
+    st.write("主简历和其他岗位版本不会受到影响。建议先下载全部版本备份。")
+    confirmed = st.checkbox(
+        "我确认删除这个岗位版本",
+        key=f"confirm_delete_job_version_{version_id}",
+    )
+    if st.button(
+        "确认删除",
+        type="primary",
+        use_container_width=True,
+        disabled=not confirmed,
+    ):
+        _delete_job_version(version_id)
+
+
 def _master_resume_json(resume: dict) -> bytes:
     """生成不含照片二进制数据的本地主简历备份。"""
     backup = {
@@ -1197,6 +1386,30 @@ with st.container(border=True):
             ),
         ):
             _activate_job_version(selected_version_id)
+
+        st.caption("管理所选岗位版本")
+        rename_column, duplicate_column, delete_column = st.columns(3)
+        with rename_column:
+            if st.button(
+                "重命名",
+                use_container_width=True,
+                help="只修改版本名称。",
+            ):
+                _show_rename_job_version_dialog(selected_version_id)
+        with duplicate_column:
+            if st.button(
+                "复制",
+                use_container_width=True,
+                help="复制已保存的内容和 AI 结果。",
+            ):
+                _show_duplicate_job_version_dialog(selected_version_id)
+        with delete_column:
+            if st.button(
+                "删除",
+                use_container_width=True,
+                help="确认后永久删除这个岗位版本。",
+            ):
+                _show_delete_job_version_dialog(selected_version_id)
     else:
         st.caption("还没有岗位版本。保存主简历后，点击“新建岗位版本”。")
 
