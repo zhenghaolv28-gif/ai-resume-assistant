@@ -3,6 +3,7 @@ from __future__ import annotations
 from importlib.util import module_from_spec, spec_from_file_location
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -18,6 +19,38 @@ SPEC.loader.exec_module(RESUME_IMPORT)
 
 
 class ResumeParserTests(unittest.TestCase):
+    def test_windows_ocr_runner_preserves_lines_without_tesseract(self) -> None:
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "TEST USER\nLocation: Shanghai\nTarget Position: Product Manager\n"
+                "WORK EXPERIENCE\n2023-Present Example Company\n"
+            ).encode("utf-8"),
+            stderr=b"",
+        )
+        with patch.object(RESUME_IMPORT.os, "name", "nt"), patch.object(
+            RESUME_IMPORT.subprocess,
+            "run",
+            return_value=completed,
+        ) as mocked_run:
+            text, language = RESUME_IMPORT._run_windows_ocr(Path("sample.png"))
+
+        self.assertEqual(language, "windows-profile")
+        self.assertIn("\nWORK EXPERIENCE\n", text)
+        self.assertIn("-ExecutionPolicy", mocked_run.call_args.args[0])
+
+    def test_windows_ocr_heading_noise_still_maps_to_skills(self) -> None:
+        parsed = RESUME_IMPORT.parse_resume_text(
+            """TEST USER
+Target Position: Product Manager
+WORK EXPERIENCE
+2023-Present Example Company
+TECHN ℃ AL SKILLS
+SQL, Figma, Product Analytics"""
+        )
+
+        self.assertEqual(parsed["skills"], "SQL, Figma, Product Analytics")
+
     def test_text_pdf_does_not_start_ocr(self) -> None:
         native_text = (
             "张三\n求职意向：产品经理\n工作经历\n"

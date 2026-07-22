@@ -8,7 +8,11 @@ from __future__ import annotations
 
 from functools import lru_cache
 from io import BytesIO
+import os
+from pathlib import Path
 import re
+import subprocess
+import tempfile
 import unicodedata
 from typing import Any, NamedTuple
 from zipfile import BadZipFile, ZipFile
@@ -164,6 +168,8 @@ _SECTION_ALIASES: dict[str, tuple[str, ...]] = {
         "奖项荣誉",
         "skills",
         "technical skills",
+        "techncal skills",
+        "techn cal skills",
         "skills and tools",
         "skills & tools",
         "technical proficiencies",
@@ -656,14 +662,90 @@ def _best_ocr_text(raw_text: str) -> str:
     return max(candidates, key=_resume_text_structure_score)
 
 
+def _run_windows_ocr(input_path: Path) -> tuple[str, str]:
+    """在 Windows 本机使用系统自带 OCR，不依赖 Tesseract 或额外 Python 包。"""
+    script_path = Path(__file__).with_name("windows_ocr.ps1")
+    if os.name != "nt" or not script_path.is_file():
+        raise ValueError("当前环境没有可用的 OCR 引擎，请安装项目依赖后重试。")
+
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script_path),
+        "-InputPath",
+        str(input_path),
+        "-MaxPages",
+        str(OCR_MAX_PDF_PAGES),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            check=False,
+            timeout=180,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError("Windows 本地 OCR 启动失败或超时，请重新上传更清晰的文件。") from exc
+
+    output = result.stdout.decode("utf-8", errors="replace")
+    if result.returncode != 0 or _meaningful_character_count(output) < 10:
+        raise ValueError(
+            "Windows 本地 OCR 没有识别到足够文字。请确认系统已安装中文或英文语言包，"
+            "并上传方向正确、清晰的文件。"
+        )
+    return _best_ocr_text(output), "windows-profile"
+
+
+def _run_windows_ocr_bytes(file_bytes: bytes, suffix: str) -> tuple[str, str]:
+    temporary_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temporary_file:
+            temporary_file.write(file_bytes)
+            temporary_path = temporary_file.name
+        return _run_windows_ocr(Path(temporary_path))
+    finally:
+        if temporary_path:
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
+
+
+def _run_windows_ocr_image(image) -> tuple[str, str]:
+    temporary_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as temporary_file:
+            temporary_path = temporary_file.name
+        image.save(temporary_path, format="PNG", optimize=True)
+        return _run_windows_ocr(Path(temporary_path))
+    finally:
+        if temporary_path:
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
+
+
 def _ocr_image(image) -> tuple[str, str]:
+    prepared = _prepare_ocr_image(image)
     try:
         import pytesseract
-    except ImportError as exc:  # pragma: no cover - deployment dependency guard
-        raise ValueError("OCR 组件未安装，请安装 requirements.txt 后重新启动应用。") from exc
+    except ImportError:  # pragma: no cover - deployment dependency guard
+        if os.name == "nt":
+            return _run_windows_ocr_image(prepared)
+        raise ValueError("OCR 组件未安装，请安装 requirements.txt 后重新启动应用。")
 
-    language = _tesseract_language()
-    prepared = _prepare_ocr_image(image)
+    try:
+        language = _tesseract_language()
+    except ValueError:
+        if os.name == "nt":
+            return _run_windows_ocr_image(prepared)
+        raise
     config = "--oem 3 --psm 3 -c preserve_interword_spaces=1"
     try:
         raw_text = pytesseract.image_to_string(
@@ -683,8 +765,12 @@ def _ocr_image(image) -> tuple[str, str]:
         raise ValueError("OCR 识别超时，请压缩图片或减少 PDF 页数后重试。") from exc
     except pytesseract.TesseractNotFoundError as exc:
         _tesseract_language.cache_clear()
+        if os.name == "nt":
+            return _run_windows_ocr_image(prepared)
         raise ValueError("没有找到 Tesseract OCR，请先安装 OCR 引擎后重试。") from exc
     except pytesseract.TesseractError as exc:
+        if os.name == "nt":
+            return _run_windows_ocr_image(prepared)
         raise ValueError("OCR 未能读取这张图片，请换成更清晰的原图后重试。") from exc
     return _best_ocr_text(raw_text), language
 
@@ -722,11 +808,15 @@ def _read_pdf_ocr(file_bytes: bytes) -> tuple[str, str]:
     try:
         import pypdfium2 as pdfium
     except ImportError as exc:  # pragma: no cover - deployment dependency guard
+        if os.name == "nt":
+            return _run_windows_ocr_bytes(file_bytes, ".pdf")
         raise ValueError("扫描 PDF 识别需要 pypdfium2，请先安装项目依赖。") from exc
 
     try:
         document = pdfium.PdfDocument(file_bytes)
     except Exception as exc:
+        if os.name == "nt":
+            return _run_windows_ocr_bytes(file_bytes, ".pdf")
         raise ValueError("这个 PDF 无法转换为图片，请尝试另存为新的 PDF 后再上传。") from exc
 
     try:

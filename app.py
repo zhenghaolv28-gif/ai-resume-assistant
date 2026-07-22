@@ -1254,7 +1254,10 @@ if imported_draft:
     parse_warnings = imported_draft.get("parse_warnings", [])
     if imported_draft.get("ocr_used"):
         ocr_language = imported_draft.get("ocr_language", "")
-        language_note = "（中英文）" if "chi_sim" in ocr_language else ""
+        if ocr_language == "windows-profile":
+            language_note = "（Windows 本地）"
+        else:
+            language_note = "（中英文）" if "chi_sim" in ocr_language else ""
         st.success(
             f"已自动使用{imported_draft.get('extraction_method', 'OCR')}{language_note}取字。"
             "扫描件可能出现相似字、空格或日期误差，请重点核对姓名、联系方式和时间。"

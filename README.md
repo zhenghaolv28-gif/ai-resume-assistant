@@ -25,7 +25,7 @@
 
 Windows 用户可以双击 `启动简历助手.bat`。
 
-图片和扫描 PDF 识别依赖 Tesseract OCR。本地使用 OCR 前，需要安装 Tesseract，并勾选或安装简体中文 `chi_sim` 与英文 `eng` 语言包；Streamlit 云端会根据 `packages.txt` 自动安装。
+图片和扫描 PDF 会自动选择可用的本地 OCR。Windows 本机优先使用 Tesseract；如果没有安装 Tesseract 或相关 Python 包，会自动切换到 Windows 自带的离线 OCR。Streamlit 云端会根据 `packages.txt` 自动安装中英文 Tesseract。
 
 也可以在项目目录运行：
 
