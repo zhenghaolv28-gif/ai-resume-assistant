@@ -278,19 +278,20 @@ def create_resume_preview_html(
   <style>
     .resume-preview-shell {{ width: 100%; padding: 18px; border-radius: 18px; background: #111318; box-sizing: border-box; }}
     .resume-preview-page {{ width: min(100%, 760px); min-height: 980px; margin: 0 auto; padding: 46px 52px 54px; box-sizing: border-box; background: #fff; color: var(--resume-text); box-shadow: 0 24px 60px rgba(0,0,0,.28); font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; }}
-    .resume-preview-title {{ margin: -46px -52px 24px; padding: 13px; text-align: center; color: #fff; background: var(--resume-primary); font-size: 20px; font-weight: 800; letter-spacing: .42em; text-indent: .42em; }}
+    .resume-preview-title {{ margin: -46px -52px 24px; padding: 13px; text-align: center; color: #fff !important; background: var(--resume-primary); font-size: 20px; font-weight: 800; letter-spacing: .42em; text-indent: .42em; }}
     .resume-preview-header {{ display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 24px 26px; border: 1px solid var(--resume-border); border-bottom: 3px solid var(--resume-accent); background: var(--resume-pale); }}
     .resume-preview-header-dark {{ color: #fff; background: var(--resume-primary); border-color: var(--resume-primary); border-bottom-color: var(--resume-accent); }}
     .resume-preview-header-line {{ padding-left: 0; padding-right: 0; background: #fff; border-width: 0 0 2px; }}
-    .resume-preview-name {{ margin: 0 0 7px; font-size: 31px; line-height: 1.18; font-weight: 800; letter-spacing: .04em; }}
-    .resume-preview-role {{ margin: 0 0 7px; color: var(--resume-accent); font-size: 15px; font-weight: 700; }}
-    .resume-preview-header-dark .resume-preview-role {{ color: var(--resume-soft); }}
-    .resume-preview-contact {{ margin: 0; color: var(--resume-muted); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }}
-    .resume-preview-header-dark .resume-preview-contact {{ color: #dce7ef; }}
+    .resume-preview-name {{ margin: 0 0 7px; color: var(--resume-primary) !important; font-size: 31px; line-height: 1.18; font-weight: 800; letter-spacing: .04em; }}
+    .resume-preview-header-dark .resume-preview-name {{ color: #fff !important; }}
+    .resume-preview-role {{ margin: 0 0 7px; color: var(--resume-accent) !important; font-size: 15px; font-weight: 700; }}
+    .resume-preview-header-dark .resume-preview-role {{ color: var(--resume-soft) !important; }}
+    .resume-preview-contact {{ margin: 0; color: var(--resume-muted) !important; font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }}
+    .resume-preview-header-dark .resume-preview-contact {{ color: #dce7ef !important; }}
     .resume-preview-photo {{ width: 92px; height: 116px; object-fit: cover; border: 4px solid #fff; box-shadow: 0 3px 14px rgba(16,42,67,.16); flex: 0 0 auto; }}
     .resume-preview-body {{ padding-top: 13px; }}
-    .resume-preview-section {{ margin: 20px 0 10px; padding: 9px 12px; color: var(--resume-primary); background: var(--resume-pale); border: 1px solid var(--resume-border); border-left: 5px solid var(--resume-accent); font-size: 17px; line-height: 1.35; }}
-    .resume-preview-paragraph, .resume-preview-bullet {{ margin: 0 0 7px; font-size: 13.5px; line-height: 1.72; white-space: normal; overflow-wrap: anywhere; }}
+    .resume-preview-section {{ margin: 20px 0 10px; padding: 9px 12px; color: var(--resume-primary) !important; background: var(--resume-pale); border: 1px solid var(--resume-border); border-left: 5px solid var(--resume-accent); font-size: 17px; line-height: 1.35; }}
+    .resume-preview-paragraph, .resume-preview-bullet {{ margin: 0 0 7px; color: var(--resume-text) !important; font-size: 13.5px; line-height: 1.72; white-space: normal; overflow-wrap: anywhere; }}
     .resume-preview-bullet {{ position: relative; padding-left: 17px; }}
     .resume-preview-bullet::before {{ content: ""; position: absolute; left: 3px; top: .72em; width: 5px; height: 5px; border-radius: 50%; background: var(--resume-accent); }}
     @media (max-width: 640px) {{
