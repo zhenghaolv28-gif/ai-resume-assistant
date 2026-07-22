@@ -11,6 +11,12 @@ from uuid import uuid4
 import streamlit as st
 from dotenv import load_dotenv
 
+from browser_autosave_component import mount_browser_autosave
+from browser_persistence import (
+    build_browser_workspace_snapshot,
+    parse_json_resume_backup,
+    restore_browser_workspace_snapshot,
+)
 from job_version_operations import (
     duplicate_job_version,
     job_version_name_exists,
@@ -237,7 +243,11 @@ def _restore_version_results(version: dict) -> None:
 
 def _initialize_form_state() -> None:
     """将已保存资料稳定回填到可编辑表单。"""
-    saved_resume = st.session_state.get("resume_data", {})
+    saved_resume = (
+        st.session_state.get("resume_data")
+        or st.session_state.get("browser_unsaved_draft")
+        or {}
+    )
     for field_name in FORM_FIELDS:
         st.session_state.setdefault(
             f"form_{field_name}",
@@ -455,6 +465,139 @@ def _resume_library_json() -> bytes:
         "job_versions": versions,
     }
     return json.dumps(backup, ensure_ascii=False, indent=2).encode("utf-8")
+
+
+def _current_derived_results() -> dict:
+    """返回当前工作区中可恢复的 AI 结果，不包含任何 API Key。"""
+    return {
+        "optimized_resume": st.session_state.get("optimized_resume", ""),
+        "optimized_resume_editor": st.session_state.get(
+            "optimized_resume_editor",
+            "",
+        ),
+        "optimization_review": deepcopy(
+            st.session_state.get("optimization_review")
+        ),
+        "job_match_result": deepcopy(st.session_state.get("job_match_result")),
+    }
+
+
+def _browser_workspace_snapshot() -> dict:
+    """构造浏览器白名单快照；联系方式和 API Key 不会进入结果。"""
+    if st.session_state.get("resume_workspace_mode", "master") == "master":
+        st.session_state["master_resume_results"] = _current_derived_results()
+    return build_browser_workspace_snapshot(
+        master_resume=st.session_state.get("master_resume_data"),
+        current_resume=st.session_state.get("resume_data"),
+        job_versions=st.session_state.get("job_versions", {}),
+        master_results=st.session_state.get("master_resume_results", {}),
+        workspace_mode=st.session_state.get("resume_workspace_mode", "master"),
+        active_job_version_id=st.session_state.get("active_job_version_id"),
+        form_fields=FORM_FIELDS,
+        default_template_id=DEFAULT_TEMPLATE_ID,
+        allowed_templates=set(resume_template_options()),
+    )
+
+
+def _install_restored_workspace(restored: dict, notice: str) -> None:
+    """将已校验的浏览器或 JSON 数据安装到当前会话。"""
+    for key in tuple(st.session_state):
+        if key.startswith("form_") or key.startswith("template_selector_"):
+            st.session_state.pop(key, None)
+    _clear_derived_resume_state()
+    st.session_state["job_versions"] = restored.get("job_versions", {})
+    st.session_state["resume_workspace_mode"] = restored.get(
+        "resume_workspace_mode",
+        "master",
+    )
+    st.session_state["active_job_version_id"] = restored.get(
+        "active_job_version_id"
+    )
+    st.session_state["master_resume_results"] = deepcopy(
+        restored.get("master_results", {})
+    )
+
+    master_resume = restored.get("master_resume_data")
+    current_resume = restored.get("resume_data")
+    if master_resume:
+        st.session_state["master_resume_data"] = _copy_resume_data(master_resume)
+    else:
+        st.session_state.pop("master_resume_data", None)
+    if current_resume:
+        st.session_state["resume_data"] = _copy_resume_data(current_resume)
+        _load_resume_into_form(st.session_state["resume_data"])
+    else:
+        st.session_state.pop("resume_data", None)
+
+    unsaved_draft = restored.get("unsaved_draft")
+    if unsaved_draft:
+        st.session_state["browser_unsaved_draft"] = _copy_resume_data(unsaved_draft)
+        _load_resume_into_form(st.session_state["browser_unsaved_draft"])
+    else:
+        st.session_state.pop("browser_unsaved_draft", None)
+
+    active_version = _active_job_version()
+    if active_version:
+        _restore_version_results(active_version)
+    elif st.session_state.get("resume_workspace_mode") == "master":
+        master_results = st.session_state.get("master_resume_results", {})
+        for result_key in (
+            "optimized_resume",
+            "optimized_resume_editor",
+            "optimization_review",
+            "job_match_result",
+        ):
+            if master_results.get(result_key):
+                st.session_state[result_key] = deepcopy(master_results[result_key])
+
+    st.session_state["resume_workspace_notice"] = notice
+
+
+def _clear_resume_session_for_browser_reset() -> None:
+    """清空简历会话并安排 IndexedDB 删除，保留当前 API Key 会话值。"""
+    exact_keys = {
+        "resume_data",
+        "master_resume_data",
+        "job_versions",
+        "resume_workspace_mode",
+        "active_job_version_id",
+        "master_resume_results",
+        "browser_unsaved_draft",
+        "job_version_selector",
+        "pending_job_version_selector",
+        "resume_import_draft",
+        "resume_import_filename",
+        "resume_import_method",
+    }
+    for key in tuple(st.session_state):
+        if (
+            key in exact_keys
+            or key.startswith("form_")
+            or key.startswith("import_")
+            or key.startswith("template_selector_")
+        ):
+            st.session_state.pop(key, None)
+    _clear_derived_resume_state()
+    st.session_state["job_versions"] = {}
+    st.session_state["resume_workspace_mode"] = "master"
+    st.session_state["active_job_version_id"] = None
+    st.session_state["browser_restore_applied"] = True
+    st.session_state["browser_storage_command"] = {
+        "action": "clear",
+        "nonce": uuid4().hex,
+    }
+    st.session_state["resume_workspace_notice"] = "本机自动保存数据已清除。"
+
+
+def _restore_json_backup(raw_backup: bytes) -> None:
+    restored = parse_json_resume_backup(
+        raw_backup,
+        form_fields=FORM_FIELDS,
+        default_template_id=DEFAULT_TEMPLATE_ID,
+        allowed_templates=set(resume_template_options()),
+    )
+    _install_restored_workspace(restored, "JSON 备份已恢复，并将继续自动保存到此浏览器。")
+    st.session_state["browser_restore_applied"] = True
 
 
 def _handle_optimized_editor_change() -> None:
@@ -1199,6 +1342,24 @@ def _show_delete_job_version_dialog(version_id: str) -> None:
         _delete_job_version(version_id)
 
 
+@st.dialog("清除本机自动保存")
+def _show_clear_browser_data_dialog() -> None:
+    st.warning("将删除此浏览器保存的主简历、岗位版本、AI 结果和证件照。")
+    st.write("已经下载的 JSON 备份不会受到影响。DeepSeek API Key 也不会被写入或删除。")
+    confirmed = st.checkbox(
+        "我确认清除本机自动保存数据",
+        key="confirm_clear_browser_autosave",
+    )
+    if st.button(
+        "确认清除",
+        type="primary",
+        use_container_width=True,
+        disabled=not confirmed,
+    ):
+        _clear_resume_session_for_browser_reset()
+        st.rerun()
+
+
 def _master_resume_json(resume: dict) -> bytes:
     """生成不含照片二进制数据的本地主简历备份。"""
     backup = {
@@ -1312,10 +1473,66 @@ st.set_page_config(
 )
 st.session_state.setdefault("deepseek_api_key", os.getenv("DEEPSEEK_API_KEY", ""))
 _initialize_resume_workspace()
+browser_storage_result = mount_browser_autosave(
+    _browser_workspace_snapshot(),
+    command=st.session_state.get("browser_storage_command"),
+)
+browser_storage_error = getattr(browser_storage_result, "storage_error", None)
+if browser_storage_error:
+    st.session_state["browser_storage_error"] = str(browser_storage_error)
+
+restored_browser_payload = getattr(browser_storage_result, "restored", None)
+current_session_has_resume = bool(
+    st.session_state.get("master_resume_data")
+    or st.session_state.get("resume_data")
+    or st.session_state.get("job_versions")
+)
+if (
+    restored_browser_payload
+    and not st.session_state.get("browser_restore_applied")
+    and not current_session_has_resume
+):
+    restored_workspace = restore_browser_workspace_snapshot(
+        restored_browser_payload,
+        form_fields=FORM_FIELDS,
+        default_template_id=DEFAULT_TEMPLATE_ID,
+        allowed_templates=set(resume_template_options()),
+        photo_max_bytes=PHOTO_MAX_BYTES,
+    )
+    st.session_state["browser_restore_applied"] = True
+    if restored_workspace:
+        _install_restored_workspace(
+            restored_workspace,
+            "已从此浏览器恢复上次自动保存的简历。手机、邮箱和城市需要重新填写。",
+        )
+        st.rerun()
+
+if getattr(browser_storage_result, "cleared", None):
+    st.session_state.pop("browser_storage_command", None)
 _initialize_form_state()
 
 _inject_brand_styles()
 _render_hero()
+
+with st.container(border=True):
+    autosave_status_column, autosave_action_column = st.columns([5, 2])
+    with autosave_status_column:
+        st.markdown("**本机自动保存已开启**")
+        st.caption(
+            "停止输入约 1 秒后保存主简历、岗位版本、AI 结果和证件照。"
+            "浏览器只保留姓名，不保存手机、邮箱、城市或 DeepSeek API Key。"
+        )
+        if st.session_state.get("browser_storage_error"):
+            st.warning(
+                "当前浏览器无法使用 IndexedDB，请继续使用 JSON 备份。"
+            )
+    with autosave_action_column:
+        if st.button(
+            "清除本机自动保存",
+            use_container_width=True,
+            help="删除此浏览器保存的简历与证件照。",
+        ):
+            _show_clear_browser_data_dialog()
 
 workspace_notice = st.session_state.pop("resume_workspace_notice", None)
 if workspace_notice:
@@ -1620,6 +1837,32 @@ if master_resume:
             "JSON 备份不包含证件照。"
         )
 
+with st.expander("从 JSON 备份恢复", expanded=False):
+    st.write("支持本应用导出的主简历备份或全部版本备份。恢复后会覆盖当前工作区。")
+    st.caption("JSON 备份不包含证件照；手机、邮箱和城市会按备份内容恢复。")
+    json_backup_file = st.file_uploader(
+        "选择 JSON 备份",
+        type=("json",),
+        key="json_backup_restore_file",
+    )
+    confirm_json_restore = st.checkbox(
+        "我确认用这个备份覆盖当前工作区",
+        key="confirm_json_backup_restore",
+    )
+    if st.button(
+        "恢复 JSON 备份",
+        use_container_width=True,
+        disabled=not confirm_json_restore,
+    ):
+        if json_backup_file is None:
+            st.warning("请先选择 JSON 备份文件。")
+        else:
+            try:
+                _restore_json_backup(json_backup_file.getvalue())
+                st.rerun()
+            except ValueError as error:
+                st.error(str(error))
+
 with st.sidebar:
     st.header("AI 连接")
     st.caption("连接 DeepSeek，让狐狸顾问开始分析和改写。")
@@ -1687,7 +1930,11 @@ with st.form("resume_form"):
         key="form_photo",
         help="建议使用竖版 3:4 证件照，支持 JPG、PNG，最大 5MB。照片不会发送给 AI。",
     )
-    saved_photo = st.session_state.get("resume_data", {}).get("photo_bytes")
+    saved_photo = (
+        st.session_state.get("resume_data")
+        or st.session_state.get("browser_unsaved_draft")
+        or {}
+    ).get("photo_bytes")
     if uploaded_photo is not None:
         st.image(uploaded_photo, width=120, caption="新上传的证件照")
     elif saved_photo:
@@ -1749,7 +1996,10 @@ if submitted:
     if not name.strip() or not target_role.strip():
         st.warning("请先填写带 * 的姓名和目标岗位。")
     else:
-        previous_resume_data = st.session_state.get("resume_data")
+        previous_resume_data = (
+            st.session_state.get("resume_data")
+            or st.session_state.get("browser_unsaved_draft")
+        )
         photo_bytes = (
             uploaded_photo.getvalue()
             if uploaded_photo is not None
@@ -1783,6 +2033,7 @@ if submitted:
             _clear_derived_resume_state()
 
         saved_as_job_version = _save_resume_to_current_workspace(updated_resume_data)
+        st.session_state.pop("browser_unsaved_draft", None)
 
         if ai_content_changed and had_optimized_resume:
             save_message = "信息已更新。岗位或经历发生变化，请重新进行 AI 优化。"
